@@ -4,3 +4,6 @@ __pycache__/
 .venv/
 venv/
 *.log
+
+# never commit recovery codes / secrets
+*recovery-codes*

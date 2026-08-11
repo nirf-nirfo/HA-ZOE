@@ -1,4 +1,5 @@
 import asyncio
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -9,6 +10,7 @@ from fastapi import FastAPI, Request, Response
 from app.claude_agent import (
     LIST_TOOLS,
     MEMORY_TOOLS,
+    MONITOR_TOOLS,
     REMINDER_TOOLS,
     get_known_entities,
     initial_context,
@@ -19,6 +21,7 @@ from app.ha_client import ha_client
 from app.logging_config import logger
 from app.lists import add_item, clear_list, get_all_list_names, get_list, remove_items
 from app.memory import forget, remember
+from app import monitors
 from app.reminders import (
     RECURRENCES,
     add_reminder,
@@ -48,6 +51,34 @@ async def startup() -> None:
     if fixed:
         logger.info("Self-healed %d yearly reminder(s) to their correct next occurrence", fixed)
     asyncio.create_task(_reminder_loop())
+    asyncio.create_task(_monitor_loop())
+
+
+async def _monitor_loop() -> None:
+    while True:
+        await asyncio.sleep(60)
+        now = time.time()
+        try:
+            due = monitors.get_due(now)
+        except Exception:
+            logger.exception("Monitor loop: get_due failed")
+            continue
+        for m in due:
+            try:
+                live = await ha_client.get_states([m.entity_id])
+                actual = live.get(m.entity_id, {}).get("state", "unknown")
+                # Edge-triggered: alert on the first check that's bad, and whenever the device
+                # leaves the expected state — but not repeatedly while it stays bad.
+                if actual != m.expected_state and (m.last_state is None or m.last_state == m.expected_state):
+                    logger.info("Monitor %s: %s is %s (expected %s) — alerting", m.id, m.entity_id, actual, m.expected_state)
+                    await send_message(m.sender, m.alert_text)
+                monitors.advance(m.id, now + m.interval_minutes * 60, actual)
+            except Exception:
+                logger.exception("Monitor loop: check failed for %s", m.id)
+        try:
+            monitors.purge_expired(now)
+        except Exception:
+            logger.exception("Monitor loop: purge_expired failed")
 
 
 async def _reminder_loop() -> None:
@@ -315,6 +346,70 @@ def _handle_memory_call(tool: str, inp: dict) -> str:
     return ""
 
 
+def _handle_monitor_call(sender: str, tool: str, inp: dict, known_entities: dict) -> str:
+    if tool == "monitor_device":
+        entity_id = inp.get("entity_id")
+        entity_def = known_entities.get(entity_id)
+        if entity_def is None:
+            return "That device isn't in the known list — I can't monitor it."
+        expected = (inp.get("expected_state") or "").strip()
+        alert_text = (inp.get("alert_text") or "").strip()
+        if not expected or not alert_text:
+            return "I need both the expected state and the alert message to set up monitoring."
+        try:
+            interval_minutes = float(inp.get("interval_minutes"))
+        except (TypeError, ValueError):
+            return "How often should I check? Give an interval in minutes."
+        if interval_minutes < 1:
+            interval_minutes = 1  # the loop ticks once a minute
+        try:
+            dt = datetime.fromisoformat(inp["until"])
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=_IL_TZ)
+            until = dt.timestamp()
+        except (ValueError, KeyError):
+            return "Until when should I keep checking? Please give an end date/time."
+        if until <= time.time():
+            return "That end time is already in the past — nothing to monitor."
+
+        monitors.add_monitor(
+            sender, entity_id, entity_def["name"], expected, alert_text, interval_minutes, until
+        )
+        until_str = dt.astimezone(_IL_TZ).strftime("%d/%m/%Y %H:%M")
+        every = f"{interval_minutes:g} min" if interval_minutes < 60 else f"{interval_minutes / 60:g} h"
+        return (
+            f"Monitoring {entity_def['name']} every {every} until {until_str}; I'll message you "
+            f"whenever it isn't '{expected}'."
+        )
+
+    if tool == "list_monitors":
+        active = monitors.list_monitors(sender)
+        if not active:
+            return "You have no active monitors."
+        lines = []
+        for m in active:
+            until_str = datetime.fromtimestamp(m.until, tz=_IL_TZ).strftime("%d/%m/%Y %H:%M")
+            every = f"{m.interval_minutes:g} min" if m.interval_minutes < 60 else f"{m.interval_minutes / 60:g} h"
+            lines.append(f"• [{m.id}] {m.entity_name}: every {every} until {until_str}, expect '{m.expected_state}'")
+        return "Active monitors:\n" + "\n".join(lines)
+
+    if tool == "cancel_monitor":
+        query = (inp.get("text") or "").strip()
+        if not query:
+            return "Which monitor should I stop?"
+        matches = monitors.find_matching(sender, query)
+        if not matches:
+            return f"I couldn't find a monitor matching '{query}'."
+        if len(matches) > 1:
+            lines = [f"• [{m.id}] {m.entity_name}" for m in matches]
+            return f"Several monitors match '{query}' — which one? Reply with its id:\n" + "\n".join(lines)
+        m = matches[0]
+        monitors.delete_monitor(m.id, sender)
+        return f"Stopped monitoring {m.entity_name} ✅"
+
+    return ""
+
+
 async def _dispatch_tool(
     sender: str, tool: str, inp: dict, known_entities: dict, pending_actions: list
 ) -> str:
@@ -328,6 +423,9 @@ async def _dispatch_tool(
 
     if tool in MEMORY_TOOLS:
         return _handle_memory_call(tool, inp)
+
+    if tool in MONITOR_TOOLS:
+        return _handle_monitor_call(sender, tool, inp, known_entities)
 
     entity_id = inp.get("entity_id")
     entity_def = known_entities.get(entity_id)

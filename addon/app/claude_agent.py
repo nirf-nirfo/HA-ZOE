@@ -31,6 +31,10 @@ _SHOW_ALL_LISTS = "show_all_lists"
 _REMEMBER = "remember"
 _FORGET = "forget"
 
+_MONITOR_DEVICE = "monitor_device"
+_LIST_MONITORS = "list_monitors"
+_CANCEL_MONITOR = "cancel_monitor"
+
 REMINDER_TOOLS = {
     _SET_REMINDER,
     _LIST_REMINDERS,
@@ -41,6 +45,7 @@ REMINDER_TOOLS = {
 }
 LIST_TOOLS = {_ADD_TO_LIST, _REMOVE_FROM_LIST, _CLEAR_LIST, _SHOW_LIST, _SHOW_ALL_LISTS}
 MEMORY_TOOLS = {_REMEMBER, _FORGET}
+MONITOR_TOOLS = {_MONITOR_DEVICE, _LIST_MONITORS, _CANCEL_MONITOR}
 
 SYSTEM_PROMPT = (
     "You are ZOE, a personal assistant reachable over WhatsApp that also controls "
@@ -111,6 +116,15 @@ SYSTEM_PROMPT = (
     "temperature with set_temperature and service_data {\"temperature\": N} in Celsius (16-30). "
     "Set fan speed with set_fan_mode. If the user just says 'turn on the AC' without a mode, "
     "use cool. "
+    "When the user asks you to keep an eye on a device over time and notify them if it's in a "
+    "wrong state — e.g. 'check every hour for 3 days that the front door is locked, and tell me "
+    "if it's not' — call monitor_device: entity_id, expected_state (the state it SHOULD be in, "
+    "exactly as it appears in the device list, e.g. 'locked'), interval_minutes (how often), until "
+    "(ISO datetime derived from the duration, e.g. now + 3 days), and alert_text (what to message "
+    "when it's not in the expected state). ZOE checks on that cadence and alerts once each time the "
+    "device leaves the expected state. Use list_monitors to show active monitors and cancel_monitor "
+    "to stop one. This is different from a reminder (a monitor watches a device's live state); use "
+    "a reminder for a plain timed message. "
     "For anything that is not about a known device, reminder, or list — general questions, writing or "
     "drafting text, current events, weather, or any other normal personal-assistant "
     "request — do not call any tool. Just answer directly and naturally in plain text, "
@@ -352,6 +366,56 @@ def _build_tools(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "type": "object",
                 "properties": {
                     "text": {"type": "string", "description": "A snippet of the fact to forget."},
+                },
+                "required": ["text"],
+            },
+        },
+        {
+            "name": _MONITOR_DEVICE,
+            "description": "Repeatedly checks one device on a schedule until an end time, and "
+            "messages the user whenever the device is NOT in the expected state. Use for requests "
+            "like 'check every hour for 3 days that the door is locked and tell me if it isn't'.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "entity_id": {"type": "string", "enum": entity_ids},
+                    "expected_state": {
+                        "type": "string",
+                        "description": "The state the device SHOULD be in, exactly as Home Assistant "
+                        "reports it (e.g. 'locked', 'closed', 'off', 'on'). An alert is sent whenever "
+                        "the actual state differs from this.",
+                    },
+                    "alert_text": {
+                        "type": "string",
+                        "description": "The message to send the user when the device is not in the "
+                        "expected state, e.g. 'The front door is not locked!'.",
+                    },
+                    "interval_minutes": {
+                        "type": "number",
+                        "description": "How often to check, in minutes (e.g. 60 for hourly).",
+                    },
+                    "until": {
+                        "type": "string",
+                        "description": "ISO 8601 datetime when to stop monitoring (Israel time). "
+                        "Derive it from the duration, e.g. 'for 3 days' = now + 3 days.",
+                    },
+                },
+                "required": ["entity_id", "expected_state", "alert_text", "interval_minutes", "until"],
+            },
+        },
+        {
+            "name": _LIST_MONITORS,
+            "description": "Lists the user's active device monitors.",
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": _CANCEL_MONITOR,
+            "description": "Stops a device monitor, identified by a snippet of the device name it "
+            "watches (or its id).",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Device-name snippet or monitor id."},
                 },
                 "required": ["text"],
             },
