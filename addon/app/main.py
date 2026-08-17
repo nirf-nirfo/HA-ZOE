@@ -1,6 +1,8 @@
 import asyncio
+import json
 import time
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 _IL_TZ = ZoneInfo("Asia/Jerusalem")
@@ -97,6 +99,35 @@ async def _reminder_loop() -> None:
                 await send_message(reminder.sender, f"⏰ {reminder.text}")
             except Exception:
                 logger.exception("Reminder loop: failed to send reminder %s", reminder.id)
+
+
+@app.post("/admin/import")
+async def admin_import(request: Request) -> Response:
+    """One-time data migration into a fresh install. Writes the /data JSON stores from the
+    request body. Double-guarded: reachable only from the local network (rejects anything
+    arriving through the Cloudflare tunnel) AND requires the app-secret token. Remove after use."""
+    client_host = request.client.host if request.client else ""
+    if not client_host.startswith("192.168."):
+        return Response(status_code=403)
+    if request.query_params.get("token") != settings.whatsapp_app_secret:
+        return Response(status_code=403)
+
+    payload = await request.json()
+    targets = {
+        "reminders": settings.reminders_path,
+        "lists": settings.lists_path,
+        "memory": settings.memory_path,
+        "monitors": settings.monitors_path,
+    }
+    written = []
+    for key, path_str in targets.items():
+        if key in payload:
+            path = Path(path_str)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload[key], ensure_ascii=False), encoding="utf-8")
+            written.append(key)
+    logger.info("admin_import wrote: %s", written)
+    return Response(content=json.dumps({"written": written}), media_type="application/json")
 
 
 @app.get("/webhook")
@@ -484,7 +515,7 @@ async def _handle_message(sender: str, text: str) -> None:
     known_entities = get_known_entities()
     states = await ha_client.get_states(list(known_entities.keys()))
 
-    messages: list = [{"role": "user", "content": initial_context(text, states)}]
+    messages: list = [{"role": "user", "content": initial_context(text, states, sender)}]
     pending_actions: list = []
     final_text = ""
 

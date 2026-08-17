@@ -130,6 +130,10 @@ SYSTEM_PROMPT = (
     "request — do not call any tool. Just answer directly and naturally in plain text, "
     "the same way you would in a normal conversation. Use the web_search tool when you "
     "need current or real-world information you would otherwise be unsure about. "
+    "You are told which WhatsApp number each message is from. If a Known fact links that number "
+    "to a person and their gender, address them accordingly — in Hebrew use the correct gendered "
+    "forms (masculine for a male, feminine for a female). If you don't know the sender's gender, "
+    "stay neutral. "
     "You have a long-term memory of durable facts about the user and household — shown to you "
     "each turn under 'Known facts'. Use them naturally without being asked (e.g. if you know the "
     "salon AC is preferred at 23°, use that when they say 'turn on the AC in the salon'). When the "
@@ -424,8 +428,8 @@ def _build_tools(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-def initial_context(user_text: str, states: dict[str, Any]) -> str:
-    """Builds the first user message: current time, device catalog + live state, request."""
+def initial_context(user_text: str, states: dict[str, Any], sender: str | None = None) -> str:
+    """Builds the first user message: current time, sender, device catalog + live state, request."""
     entities = _load_entities()
     entity_summary = "\n".join(
         f"- {e['entity_id']} ({e['name']}): domain={e['domain']}, "
@@ -439,8 +443,10 @@ def initial_context(user_text: str, states: dict[str, Any]) -> str:
         if facts
         else ""
     )
+    sender_line = f"Message is from WhatsApp number: {sender}\n" if sender else ""
     return (
         f"Current datetime (Israel): {now_str}\n"
+        f"{sender_line}"
         f"Known devices:\n{entity_summary}\n\n"
         f"{facts_block}"
         f"User message: {user_text}"
