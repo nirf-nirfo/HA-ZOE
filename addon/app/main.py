@@ -1,8 +1,6 @@
 import asyncio
-import json
 import time
 from datetime import datetime
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 _IL_TZ = ZoneInfo("Asia/Jerusalem")
@@ -23,7 +21,7 @@ from app.ha_client import ha_client
 from app.logging_config import logger
 from app.lists import add_item, clear_list, get_all_list_names, get_list, remove_items
 from app.memory import forget, remember
-from app import monitors
+from app import conversation, monitors
 from app.reminders import (
     RECURRENCES,
     add_reminder,
@@ -99,35 +97,6 @@ async def _reminder_loop() -> None:
                 await send_message(reminder.sender, f"⏰ {reminder.text}")
             except Exception:
                 logger.exception("Reminder loop: failed to send reminder %s", reminder.id)
-
-
-@app.post("/admin/import")
-async def admin_import(request: Request) -> Response:
-    """One-time data migration into a fresh install. Writes the /data JSON stores from the
-    request body. Double-guarded: reachable only from the local network (rejects anything
-    arriving through the Cloudflare tunnel) AND requires the app-secret token. Remove after use."""
-    client_host = request.client.host if request.client else ""
-    if not client_host.startswith("192.168."):
-        return Response(status_code=403)
-    if request.query_params.get("token") != settings.whatsapp_app_secret:
-        return Response(status_code=403)
-
-    payload = await request.json()
-    targets = {
-        "reminders": settings.reminders_path,
-        "lists": settings.lists_path,
-        "memory": settings.memory_path,
-        "monitors": settings.monitors_path,
-    }
-    written = []
-    for key, path_str in targets.items():
-        if key in payload:
-            path = Path(path_str)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(payload[key], ensure_ascii=False), encoding="utf-8")
-            written.append(key)
-    logger.info("admin_import wrote: %s", written)
-    return Response(content=json.dumps({"written": written}), media_type="application/json")
 
 
 @app.get("/webhook")
@@ -509,13 +478,18 @@ async def _handle_message(sender: str, text: str) -> None:
                     action.entity_id, action.domain, action.service, action.service_data, action.description
                 )
             )
-        await send_message(sender, "\n".join(replies))
+        reply = "\n".join(replies)
+        await send_message(sender, reply)
+        conversation.record(sender, text, reply)
         return
 
     known_entities = get_known_entities()
     states = await ha_client.get_states(list(known_entities.keys()))
 
-    messages: list = [{"role": "user", "content": initial_context(text, states, sender)}]
+    # Prepend recent turns so follow-ups ("turn it on", "cancel it") have context.
+    messages: list = conversation.recent(sender) + [
+        {"role": "user", "content": initial_context(text, states, sender)}
+    ]
     pending_actions: list = []
     final_text = ""
 
@@ -548,5 +522,8 @@ async def _handle_message(sender: str, text: str) -> None:
 
     if final_text:
         await send_message(sender, final_text)
+        conversation.record(sender, text, final_text)
     elif not pending_actions:
-        await send_message(sender, "I'm not sure what you mean — could you rephrase?")
+        fallback = "I'm not sure what you mean — could you rephrase?"
+        await send_message(sender, fallback)
+        conversation.record(sender, text, fallback)
