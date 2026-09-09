@@ -12,6 +12,7 @@ from app.claude_agent import (
     MEMORY_TOOLS,
     MONITOR_TOOLS,
     REMINDER_TOOLS,
+    SCHEDULED_ACTION_TOOLS,
     get_known_entities,
     initial_context,
     run_model,
@@ -21,7 +22,7 @@ from app.ha_client import ha_client
 from app.logging_config import logger
 from app.lists import add_item, clear_list, get_all_list_names, get_list, remove_items
 from app.memory import forget, remember
-from app import conversation, monitors
+from app import conversation, monitors, scheduled_actions
 from app.reminders import (
     RECURRENCES,
     add_reminder,
@@ -52,6 +53,40 @@ async def startup() -> None:
         logger.info("Self-healed %d yearly reminder(s) to their correct next occurrence", fixed)
     asyncio.create_task(_reminder_loop())
     asyncio.create_task(_monitor_loop())
+    asyncio.create_task(_scheduled_action_loop())
+
+
+async def _scheduled_action_loop() -> None:
+    while True:
+        await asyncio.sleep(60)
+        try:
+            due = scheduled_actions.pop_due()
+        except Exception:
+            logger.exception("Scheduled action loop: pop_due failed")
+            continue
+        for a in due:
+            try:
+                known_entities = get_known_entities()
+                entity_def = known_entities.get(a.entity_id)
+                if entity_def and entity_def.get("risky"):
+                    # Same yes/confirm gate as an immediate risky action — never auto-run these.
+                    pending = make_pending(a.entity_id, a.domain, a.service, a.service_data, a.description)
+                    store_pending(a.sender, [pending])
+                    logger.info("Scheduled risky action %s due — queued for confirmation", a.id)
+                    await send_message(
+                        a.sender, f"Time to run: {a.description}. This is sensitive — reply 'yes' to confirm."
+                    )
+                    continue
+                logger.info("Running scheduled action %s: %s", a.id, a.description)
+                reply = await _execute_control_action(a.entity_id, a.domain, a.service, a.service_data, a.description)
+                if a.duration_minutes and a.service == "turn_on" and "✅" in reply:
+                    asyncio.create_task(
+                        _auto_turn_off_later(a.sender, a.entity_id, a.domain, a.entity_name, a.duration_minutes)
+                    )
+                    reply += f" (will auto turn-off in {a.duration_minutes:g} min)"
+                await send_message(a.sender, f"⏰ Scheduled action: {reply}")
+            except Exception:
+                logger.exception("Scheduled action loop: failed to run %s", a.id)
 
 
 async def _monitor_loop() -> None:
@@ -410,6 +445,71 @@ def _handle_monitor_call(sender: str, tool: str, inp: dict, known_entities: dict
     return ""
 
 
+def _handle_scheduled_action_call(sender: str, tool: str, inp: dict, known_entities: dict) -> str:
+    if tool == "schedule_action":
+        entity_id = inp.get("entity_id")
+        entity_def = known_entities.get(entity_id)
+        if entity_def is None:
+            return "That device isn't in the known list — I can't schedule an action on it."
+        domain = inp.get("domain")
+        service = inp.get("service")
+        if not domain or not service:
+            return "schedule_action needs both a domain and a service."
+        service_data = inp.get("service_data") or {}
+        duration_minutes = inp.get("duration_minutes")
+        try:
+            dt = datetime.fromisoformat(inp["run_at"])
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=_IL_TZ)
+            run_at = dt.timestamp()
+        except (ValueError, KeyError):
+            return "I couldn't parse that date/time — please try again."
+        if run_at <= datetime.now(tz=_IL_TZ).timestamp():
+            when = dt.astimezone(_IL_TZ).strftime("%d/%m/%Y %H:%M")
+            return f"That time ({when}) is in the past, so I didn't schedule it."
+
+        existing = scheduled_actions.find_duplicate(sender, entity_id, service, service_data, run_at)
+        if existing:
+            when = datetime.fromtimestamp(existing.run_at, tz=_IL_TZ).strftime("%d/%m/%Y %H:%M")
+            return f"You already have that scheduled for {when} — keeping the existing one."
+
+        description = f"{entity_def['name']}: {service}"
+        action = scheduled_actions.add_action(
+            sender, entity_id, entity_def["name"], domain, service, service_data,
+            description, run_at, duration_minutes,
+        )
+        when = datetime.fromtimestamp(action.run_at, tz=_IL_TZ).strftime("%d/%m/%Y %H:%M")
+        risky_note = " Since this device is sensitive, I'll still ask you to confirm at that moment." \
+            if entity_def.get("risky") else ""
+        return f"Scheduled ✅ — I'll {description} at {when}.{risky_note}"
+
+    if tool == "list_scheduled_actions":
+        pending = scheduled_actions.list_actions(sender)
+        if not pending:
+            return "You have no pending scheduled actions."
+        lines = [
+            f"• [{a.id}] {datetime.fromtimestamp(a.run_at, tz=_IL_TZ).strftime('%d/%m/%Y %H:%M')} — {a.description}"
+            for a in pending
+        ]
+        return "Scheduled actions:\n" + "\n".join(lines)
+
+    if tool == "cancel_scheduled_action":
+        query = (inp.get("text") or "").strip()
+        if not query:
+            return "Which scheduled action should I cancel?"
+        matches = scheduled_actions.find_matching(sender, query)
+        if not matches:
+            return f"I couldn't find a scheduled action matching '{query}'."
+        if len(matches) > 1:
+            lines = [f"• [{a.id}] {a.description}" for a in matches]
+            return f"Several match '{query}' — which one? Reply with its id:\n" + "\n".join(lines)
+        a = matches[0]
+        scheduled_actions.delete_action(a.id, sender)
+        return f"Cancelled ✅ — {a.description}"
+
+    return ""
+
+
 async def _dispatch_tool(
     sender: str, tool: str, inp: dict, known_entities: dict, pending_actions: list
 ) -> str:
@@ -426,6 +526,9 @@ async def _dispatch_tool(
 
     if tool in MONITOR_TOOLS:
         return _handle_monitor_call(sender, tool, inp, known_entities)
+
+    if tool in SCHEDULED_ACTION_TOOLS:
+        return _handle_scheduled_action_call(sender, tool, inp, known_entities)
 
     entity_id = inp.get("entity_id")
     entity_def = known_entities.get(entity_id)

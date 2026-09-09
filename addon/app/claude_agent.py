@@ -35,6 +35,10 @@ _MONITOR_DEVICE = "monitor_device"
 _LIST_MONITORS = "list_monitors"
 _CANCEL_MONITOR = "cancel_monitor"
 
+_SCHEDULE_ACTION = "schedule_action"
+_LIST_SCHEDULED_ACTIONS = "list_scheduled_actions"
+_CANCEL_SCHEDULED_ACTION = "cancel_scheduled_action"
+
 REMINDER_TOOLS = {
     _SET_REMINDER,
     _LIST_REMINDERS,
@@ -46,6 +50,7 @@ REMINDER_TOOLS = {
 LIST_TOOLS = {_ADD_TO_LIST, _REMOVE_FROM_LIST, _CLEAR_LIST, _SHOW_LIST, _SHOW_ALL_LISTS}
 MEMORY_TOOLS = {_REMEMBER, _FORGET}
 MONITOR_TOOLS = {_MONITOR_DEVICE, _LIST_MONITORS, _CANCEL_MONITOR}
+SCHEDULED_ACTION_TOOLS = {_SCHEDULE_ACTION, _LIST_SCHEDULED_ACTIONS, _CANCEL_SCHEDULED_ACTION}
 
 SYSTEM_PROMPT = (
     "You are ZOE, a personal assistant reachable over WhatsApp that also controls "
@@ -125,6 +130,14 @@ SYSTEM_PROMPT = (
     "device leaves the expected state. Use list_monitors to show active monitors and cancel_monitor "
     "to stop one. This is different from a reminder (a monitor watches a device's live state); use "
     "a reminder for a plain timed message. "
+    "When the user wants a device action to actually HAPPEN at a future time — not just be "
+    "reminded about it — call schedule_action, e.g. 'turn on the AC at 12', 'open the shutter at "
+    "sunrise', 'unlock the door in an hour'. This really executes the action at that time; do NOT "
+    "use set_reminder for this and do NOT just tell the user to message you again then — schedule_action "
+    "does it for them automatically. Use list_scheduled_actions to show pending ones and "
+    "cancel_scheduled_action to cancel one. A risky device (e.g. the lock) still asks for 'yes' "
+    "confirmation at the moment it's due to run, exactly like an immediate risky action would — tell "
+    "the user this when scheduling one. "
     "For anything that is not about a known device, reminder, or list — general questions, writing or "
     "drafting text, current events, weather, or any other normal personal-assistant "
     "request — do not call any tool. Just answer directly and naturally in plain text, "
@@ -189,6 +202,54 @@ def _build_tools(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     },
                 },
                 "required": ["entity_id", "domain", "service"],
+            },
+        },
+        {
+            "name": _SCHEDULE_ACTION,
+            "description": "Schedules a real Home Assistant action to run automatically at a future "
+            "time — unlike a reminder, which only sends a text message, this actually executes the "
+            "action. Use when the user wants something DONE at a time, e.g. 'turn on the AC at 12'.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "entity_id": {"type": "string", "enum": entity_ids},
+                    "domain": {"type": "string"},
+                    "service": {"type": "string", "enum": services},
+                    "service_data": {
+                        "type": "object",
+                        "description": "Optional extra service parameters (e.g. temperature, position).",
+                    },
+                    "duration_minutes": {
+                        "type": "number",
+                        "description": "If set with service=turn_on, automatically turn the "
+                        "device back off after this many minutes, once it runs.",
+                    },
+                    "run_at": {
+                        "type": "string",
+                        "description": "ISO 8601 datetime when to run this (Israel time), e.g. "
+                        "2026-08-03T12:00:00. Resolve relative times ('at noon', 'in an hour') "
+                        "using the current datetime provided in the context.",
+                    },
+                },
+                "required": ["entity_id", "domain", "service", "run_at"],
+            },
+        },
+        {
+            "name": _LIST_SCHEDULED_ACTIONS,
+            "description": "Lists the user's pending scheduled actions (device commands set to run "
+            "automatically at a future time).",
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": _CANCEL_SCHEDULED_ACTION,
+            "description": "Cancels a scheduled action, identified by a snippet of the device name "
+            "or description it refers to (or its id).",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Device/description snippet or id."},
+                },
+                "required": ["text"],
             },
         },
         {

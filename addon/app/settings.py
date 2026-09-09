@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     lists_path: str = "/data/lists.json"
     memory_path: str = "/data/memory.json"
     monitors_path: str = "/data/monitors.json"
+    scheduled_actions_path: str = "/data/scheduled_actions.json"
     whisper_host: str = "192.168.10.150"
     whisper_port: int = 10300
 
