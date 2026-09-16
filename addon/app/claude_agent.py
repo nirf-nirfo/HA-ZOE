@@ -39,6 +39,11 @@ _SCHEDULE_ACTION = "schedule_action"
 _LIST_SCHEDULED_ACTIONS = "list_scheduled_actions"
 _CANCEL_SCHEDULED_ACTION = "cancel_scheduled_action"
 
+_ADD_AGENDA_ITEM = "add_agenda_item"
+_LIST_AGENDA = "list_agenda"
+_REMOVE_AGENDA_ITEM = "remove_agenda_item"
+_SET_DAILY_BRIEFING = "set_daily_briefing"
+
 REMINDER_TOOLS = {
     _SET_REMINDER,
     _LIST_REMINDERS,
@@ -51,6 +56,7 @@ LIST_TOOLS = {_ADD_TO_LIST, _REMOVE_FROM_LIST, _CLEAR_LIST, _SHOW_LIST, _SHOW_AL
 MEMORY_TOOLS = {_REMEMBER, _FORGET}
 MONITOR_TOOLS = {_MONITOR_DEVICE, _LIST_MONITORS, _CANCEL_MONITOR}
 SCHEDULED_ACTION_TOOLS = {_SCHEDULE_ACTION, _LIST_SCHEDULED_ACTIONS, _CANCEL_SCHEDULED_ACTION}
+AGENDA_TOOLS = {_ADD_AGENDA_ITEM, _LIST_AGENDA, _REMOVE_AGENDA_ITEM, _SET_DAILY_BRIEFING}
 
 SYSTEM_PROMPT = (
     "You are ZOE, a personal assistant reachable over WhatsApp that also controls "
@@ -138,6 +144,17 @@ SYSTEM_PROMPT = (
     "cancel_scheduled_action to cancel one. A risky device (e.g. the lock) still asks for 'yes' "
     "confirmation at the moment it's due to run, exactly like an immediate risky action would — tell "
     "the user this when scheduling one. "
+    "ZOE can send a daily morning briefing summarizing that day's agenda. When the user wants to "
+    "feed you information ahead of time to be read out on a specific day (e.g. 'tomorrow I have a "
+    "9am meeting and a dentist at 5', 'on the 20th remind — well, tell me — I have the conference'), "
+    "call add_agenda_item with date (ISO date, YYYY-MM-DD, resolved from their wording relative to "
+    "the current date) and text. Use list_agenda to show what's on a given date (default today) and "
+    "remove_agenda_item to remove one by a text snippet. When the user wants to set up or change the "
+    "daily briefing itself — what time each morning ZOE should send it, or to turn it on/off — call "
+    "set_daily_briefing with hour, minute, and enabled. Agenda items are read out automatically at "
+    "that time; the user does not need to ask for the briefing each day once it's set up. This is "
+    "different from set_reminder (a reminder fires standalone at an exact time; an agenda item is "
+    "compiled into the single daily briefing message for its date). "
     "For anything that is not about a known device, reminder, or list — general questions, writing or "
     "drafting text, current events, weather, or any other normal personal-assistant "
     "request — do not call any tool. Just answer directly and naturally in plain text, "
@@ -250,6 +267,63 @@ def _build_tools(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "text": {"type": "string", "description": "Device/description snippet or id."},
                 },
                 "required": ["text"],
+            },
+        },
+        {
+            "name": _ADD_AGENDA_ITEM,
+            "description": "Adds an item to a specific day's agenda, to be read out in ZOE's daily "
+            "morning briefing for that date. Use for information given in advance about a day.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "date": {
+                        "type": "string",
+                        "description": "ISO date (YYYY-MM-DD) this item is for, resolved from the "
+                        "user's wording relative to the current date.",
+                    },
+                    "text": {"type": "string", "description": "The agenda item text."},
+                },
+                "required": ["date", "text"],
+            },
+        },
+        {
+            "name": _LIST_AGENDA,
+            "description": "Shows agenda items for a given date. Defaults to today if no date given.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "date": {"type": "string", "description": "ISO date (YYYY-MM-DD). Optional."},
+                },
+            },
+        },
+        {
+            "name": _REMOVE_AGENDA_ITEM,
+            "description": "Removes an agenda item from a specific date, matched by a text snippet.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "date": {"type": "string", "description": "ISO date (YYYY-MM-DD) of the item."},
+                    "text": {"type": "string", "description": "Snippet of the item's text to match."},
+                },
+                "required": ["date", "text"],
+            },
+        },
+        {
+            "name": _SET_DAILY_BRIEFING,
+            "description": "Configures ZOE's daily morning briefing: what local time to send it "
+            "each day, and whether it's on. Once set, the briefing is sent automatically every day "
+            "at that time with that day's agenda items.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "hour": {"type": "integer", "description": "Hour (0-23, Israel time) to send it."},
+                    "minute": {"type": "integer", "description": "Minute (0-59)."},
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "True to turn the daily briefing on (default), false to turn it off.",
+                    },
+                },
+                "required": ["hour", "minute"],
             },
         },
         {

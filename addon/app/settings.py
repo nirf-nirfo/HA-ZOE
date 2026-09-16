@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     memory_path: str = "/data/memory.json"
     monitors_path: str = "/data/monitors.json"
     scheduled_actions_path: str = "/data/scheduled_actions.json"
+    agenda_path: str = "/data/agenda.json"
+    briefing_config_path: str = "/data/briefing_config.json"
     whisper_host: str = "192.168.10.150"
     whisper_port: int = 10300
 

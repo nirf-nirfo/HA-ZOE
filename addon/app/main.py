@@ -8,6 +8,7 @@ _IL_TZ = ZoneInfo("Asia/Jerusalem")
 from fastapi import FastAPI, Request, Response
 
 from app.claude_agent import (
+    AGENDA_TOOLS,
     LIST_TOOLS,
     MEMORY_TOOLS,
     MONITOR_TOOLS,
@@ -22,7 +23,7 @@ from app.ha_client import ha_client
 from app.logging_config import logger
 from app.lists import add_item, clear_list, get_all_list_names, get_list, remove_items
 from app.memory import forget, remember
-from app import conversation, monitors, scheduled_actions
+from app import agenda, briefing, conversation, monitors, scheduled_actions
 from app.reminders import (
     RECURRENCES,
     add_reminder,
@@ -54,6 +55,37 @@ async def startup() -> None:
     asyncio.create_task(_reminder_loop())
     asyncio.create_task(_monitor_loop())
     asyncio.create_task(_scheduled_action_loop())
+    asyncio.create_task(_daily_briefing_loop())
+
+
+async def _daily_briefing_loop() -> None:
+    while True:
+        await asyncio.sleep(60)
+        try:
+            now_il = datetime.now(_IL_TZ)
+            today_str = now_il.strftime("%Y-%m-%d")
+            for cfg in briefing.all_enabled():
+                try:
+                    if cfg.last_sent_date == today_str:
+                        continue
+                    scheduled_today = now_il.replace(hour=cfg.hour, minute=cfg.minute, second=0, microsecond=0)
+                    if now_il < scheduled_today:
+                        continue
+                    items = agenda.items_for_date(cfg.sender, today_str)
+                    if items:
+                        body = "\n".join(f"• {i.text}" for i in items)
+                        text = f"☀️ Good morning! Today's agenda:\n{body}"
+                    else:
+                        text = "☀️ Good morning! Nothing on today's agenda."
+                    await send_message(cfg.sender, text)
+                    briefing.mark_sent(cfg.sender, today_str)
+                    logger.info("Sent daily briefing to %s for %s", cfg.sender, today_str)
+                except Exception:
+                    logger.exception("Daily briefing loop: failed for %s", cfg.sender)
+            # Keep the agenda store from growing forever; nothing before today is ever read again.
+            agenda.purge_before(today_str)
+        except Exception:
+            logger.exception("Daily briefing loop: tick failed")
 
 
 async def _scheduled_action_loop() -> None:
@@ -510,6 +542,63 @@ def _handle_scheduled_action_call(sender: str, tool: str, inp: dict, known_entit
     return ""
 
 
+def _valid_date(date_str: str | None) -> str | None:
+    """Validates an ISO date string, returning it unchanged if valid or None otherwise."""
+    if not date_str:
+        return None
+    try:
+        datetime.strptime(date_str, "%Y-%m-%d")
+        return date_str
+    except ValueError:
+        return None
+
+
+def _handle_agenda_call(sender: str, tool: str, inp: dict) -> str:
+    if tool == "add_agenda_item":
+        date = _valid_date(inp.get("date"))
+        text = (inp.get("text") or "").strip()
+        if not date:
+            return "I need a valid date (YYYY-MM-DD) for that agenda item."
+        if not text:
+            return "What should I add to the agenda?"
+        agenda.add_item(sender, date, text)
+        return f"Added to the agenda for {date}: {text} ✅"
+
+    if tool == "list_agenda":
+        date = _valid_date(inp.get("date")) or datetime.now(_IL_TZ).strftime("%Y-%m-%d")
+        items = agenda.items_for_date(sender, date)
+        if not items:
+            return f"No agenda items for {date}."
+        lines = [f"• [{i.id}] {i.text}" for i in items]
+        return f"Agenda for {date}:\n" + "\n".join(lines)
+
+    if tool == "remove_agenda_item":
+        date = _valid_date(inp.get("date"))
+        text = (inp.get("text") or "").strip()
+        if not date or not text:
+            return "I need both the date and a snippet of the item to remove."
+        removed = agenda.remove_item(sender, date, text)
+        if removed:
+            return f"Removed from {date}'s agenda: {', '.join(removed)} ✅"
+        return f"No agenda item matching '{text}' found on {date}."
+
+    if tool == "set_daily_briefing":
+        try:
+            hour = int(inp["hour"])
+            minute = int(inp["minute"])
+        except (TypeError, ValueError, KeyError):
+            return "I need a valid hour and minute for the daily briefing time."
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return "Hour must be 0-23 and minute 0-59."
+        enabled = inp.get("enabled", True)
+        briefing.set_config(sender, hour, minute, enabled)
+        if enabled:
+            return f"Daily briefing set for {hour:02d}:{minute:02d} ✅"
+        return "Daily briefing turned off."
+
+    return ""
+
+
 async def _dispatch_tool(
     sender: str, tool: str, inp: dict, known_entities: dict, pending_actions: list
 ) -> str:
@@ -529,6 +618,9 @@ async def _dispatch_tool(
 
     if tool in SCHEDULED_ACTION_TOOLS:
         return _handle_scheduled_action_call(sender, tool, inp, known_entities)
+
+    if tool in AGENDA_TOOLS:
+        return _handle_agenda_call(sender, tool, inp)
 
     entity_id = inp.get("entity_id")
     entity_def = known_entities.get(entity_id)
