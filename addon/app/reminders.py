@@ -209,9 +209,25 @@ def delete_all_reminders(sender: str) -> int:
     return deleted
 
 
+def yearly_for_date(sender: str, month: int, day: int) -> list[Reminder]:
+    """Yearly reminders whose original calendar day matches (month, day). Used by
+    the morning briefing to surface birthdays; yearly reminders no longer fire as
+    standalone messages, so this is the only way they reach the user."""
+    matches = []
+    for r in _load():
+        if r.sender != sender or r.recurrence != "yearly":
+            continue
+        dt = datetime.fromtimestamp(r.send_at, _IL_TZ)
+        if dt.month == month and dt.day == day:
+            matches.append(r)
+    return matches
+
+
 def pop_due() -> list[Reminder]:
     """Returns reminders whose time has come. One-shot reminders are removed;
-    recurring ones are rescheduled to their next occurrence and kept."""
+    recurring ones are rescheduled to their next occurrence and kept. Yearly
+    reminders are advanced (so their stored date stays current) but NOT returned
+    — they are surfaced only through the daily morning briefing."""
     now = time.time()
     reminders = _load()
     due = [r for r in reminders if r.send_at <= now]
@@ -222,4 +238,4 @@ def pop_due() -> list[Reminder]:
         if r.recurrence in RECURRENCES:
             remaining.append(replace(r, send_at=_next_occurrence(r.send_at, r.recurrence, now)))
     _save(remaining)
-    return due
+    return [r for r in due if r.recurrence != "yearly"]

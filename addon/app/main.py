@@ -1,6 +1,6 @@
 import asyncio
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 _IL_TZ = ZoneInfo("Asia/Jerusalem")
@@ -9,6 +9,7 @@ from fastapi import FastAPI, Request, Response
 
 from app.claude_agent import (
     AGENDA_TOOLS,
+    ANCHOR_TOOLS,
     LIST_TOOLS,
     MEMORY_TOOLS,
     MONITOR_TOOLS,
@@ -23,7 +24,8 @@ from app.ha_client import ha_client
 from app.logging_config import logger
 from app.lists import add_item, clear_list, get_all_list_names, get_list, remove_items
 from app.memory import forget, remember
-from app import agenda, briefing, conversation, monitors, scheduled_actions
+from app import agenda, anchors, briefing, conversation, holidays, monitors, scheduled_actions
+from app import reminders as reminders_mod
 from app.reminders import (
     RECURRENCES,
     add_reminder,
@@ -58,32 +60,132 @@ async def startup() -> None:
     asyncio.create_task(_daily_briefing_loop())
 
 
+# Python's weekday() returns Monday=0..Sunday=6; anchors use Sunday..Saturday strings.
+_DAY_NAMES = {6: "sunday", 0: "monday", 1: "tuesday", 2: "wednesday", 3: "thursday", 4: "friday", 5: "saturday"}
+_HEBREW_DAY_NAMES = {6: "יום ראשון", 0: "יום שני", 1: "יום שלישי", 2: "יום רביעי", 3: "יום חמישי", 4: "יום שישי", 5: "שבת"}
+
+
+def _day_key(dt: datetime) -> str:
+    return _DAY_NAMES[dt.weekday()]
+
+
+def _hebrew_day(dt: datetime) -> str:
+    return _HEBREW_DAY_NAMES[dt.weekday()]
+
+
+def _school_note(status: str) -> str:
+    if status == "off":
+        return " (חופש מבית הספר)"
+    if status == "ceremony":
+        return " (טקס בבית הספר)"
+    return ""
+
+
+async def _compile_morning_briefing(sender: str, dt: datetime) -> str:
+    date = dt.strftime("%Y-%m-%d")
+    day_key = _day_key(dt)
+    anchor_list = sorted(anchors.anchors_for_date(day_key, date), key=lambda a: a.time or "00:00")
+    yearly = reminders_mod.yearly_for_date(sender, dt.month, dt.day)
+    agenda_items = agenda.items_for_date(sender, date)
+    hols = await holidays.holidays_for_date(date)
+
+    if not (anchor_list or yearly or agenda_items or hols):
+        return f"☀️ בוקר טוב! ל{_hebrew_day(dt)} אין כלום ביומן."
+
+    parts = [f"☀️ בוקר טוב! סדר יום ל{_hebrew_day(dt)}:"]
+
+    if anchor_list:
+        lines = []
+        for a in anchor_list:
+            prefix = f"{a.time} — " if a.time else ""
+            lines.append(f"• {prefix}{a.text}")
+        parts.append("⚓ עוגנים:\n" + "\n".join(lines))
+
+    if yearly:
+        parts.append("🎂 קבועות:\n" + "\n".join(f"• {r.text}" for r in yearly))
+
+    if hols:
+        lines = [f"• {h['title']}{_school_note(h['school_status'])}" for h in hols]
+        parts.append("🕎 חגים:\n" + "\n".join(lines))
+
+    if agenda_items:
+        parts.append("📌 היום:\n" + "\n".join(f"• {i.text}" for i in agenda_items))
+
+    return "\n\n".join(parts)
+
+
+def _one_line_items(anchor_list, yearly, agenda_items, hols) -> str:
+    bits = []
+    for a in anchor_list:
+        bits.append(f"{a.text} ב-{a.time}" if a.time else a.text)
+    for r in yearly:
+        bits.append(r.text)
+    for i in agenda_items:
+        bits.append(i.text)
+    for h in hols:
+        bits.append(f"{h['title']}{_school_note(h['school_status'])}")
+    return ", ".join(bits) if bits else ""
+
+
+async def _compile_evening_briefing(sender: str, today: datetime, tomorrow: datetime) -> str:
+    today_str = today.strftime("%Y-%m-%d")
+    tomorrow_str = tomorrow.strftime("%Y-%m-%d")
+
+    today_anchors = sorted(anchors.anchors_for_date(_day_key(today), today_str), key=lambda a: a.time or "00:00")
+    today_yearly = reminders_mod.yearly_for_date(sender, today.month, today.day)
+    today_agenda = agenda.items_for_date(sender, today_str)
+    today_hols = await holidays.holidays_for_date(today_str)
+
+    tomorrow_anchors = sorted(anchors.anchors_for_date(_day_key(tomorrow), tomorrow_str), key=lambda a: a.time or "00:00")
+    tomorrow_yearly = reminders_mod.yearly_for_date(sender, tomorrow.month, tomorrow.day)
+    tomorrow_agenda = agenda.items_for_date(sender, tomorrow_str)
+    tomorrow_hols = await holidays.holidays_for_date(tomorrow_str)
+
+    today_summary = _one_line_items(today_anchors, today_yearly, today_agenda, today_hols)
+    tomorrow_summary = _one_line_items(tomorrow_anchors, tomorrow_yearly, tomorrow_agenda, tomorrow_hols)
+
+    lines = ["🌙 ערב טוב!"]
+    if today_summary:
+        lines.append(f"היום היה: {today_summary}")
+    if tomorrow_summary:
+        lines.append(f"מחר ({_hebrew_day(tomorrow)}): {tomorrow_summary}")
+    else:
+        lines.append(f"מחר ({_hebrew_day(tomorrow)}) נקי — אין כלום ביומן.")
+    return "\n".join(lines)
+
+
 async def _daily_briefing_loop() -> None:
     while True:
         await asyncio.sleep(60)
         try:
             now_il = datetime.now(_IL_TZ)
             today_str = now_il.strftime("%Y-%m-%d")
+            tomorrow = now_il + timedelta(days=1)
             for cfg in briefing.all_enabled():
                 try:
-                    if cfg.last_sent_date == today_str:
-                        continue
-                    scheduled_today = now_il.replace(hour=cfg.hour, minute=cfg.minute, second=0, microsecond=0)
-                    if now_il < scheduled_today:
-                        continue
-                    items = agenda.items_for_date(cfg.sender, today_str)
-                    if items:
-                        body = "\n".join(f"• {i.text}" for i in items)
-                        text = f"☀️ Good morning! Today's agenda:\n{body}"
-                    else:
-                        text = "☀️ Good morning! Nothing on today's agenda."
-                    await send_message(cfg.sender, text)
-                    briefing.mark_sent(cfg.sender, today_str)
-                    logger.info("Sent daily briefing to %s for %s", cfg.sender, today_str)
+                    # Morning briefing
+                    if cfg.enabled and cfg.last_sent_date != today_str:
+                        scheduled_morning = now_il.replace(hour=cfg.hour, minute=cfg.minute, second=0, microsecond=0)
+                        if now_il >= scheduled_morning:
+                            text = await _compile_morning_briefing(cfg.sender, now_il)
+                            await send_message(cfg.sender, text)
+                            briefing.mark_sent(cfg.sender, today_str)
+                            logger.info("Sent morning briefing to %s for %s", cfg.sender, today_str)
+                    # Evening briefing
+                    if cfg.evening_enabled and cfg.last_evening_sent_date != today_str:
+                        scheduled_eve = now_il.replace(
+                            hour=cfg.evening_hour, minute=cfg.evening_minute, second=0, microsecond=0
+                        )
+                        if now_il >= scheduled_eve:
+                            text = await _compile_evening_briefing(cfg.sender, now_il, tomorrow)
+                            await send_message(cfg.sender, text)
+                            briefing.mark_evening_sent(cfg.sender, today_str)
+                            logger.info("Sent evening briefing to %s for %s", cfg.sender, today_str)
                 except Exception:
                     logger.exception("Daily briefing loop: failed for %s", cfg.sender)
-            # Keep the agenda store from growing forever; nothing before today is ever read again.
+            # Keep stores tidy; nothing before today is ever read again.
             agenda.purge_before(today_str)
+            anchors.purge_suppressions_before(today_str)
         except Exception:
             logger.exception("Daily briefing loop: tick failed")
 
@@ -587,14 +689,102 @@ def _handle_agenda_call(sender: str, tool: str, inp: dict) -> str:
             hour = int(inp["hour"])
             minute = int(inp["minute"])
         except (TypeError, ValueError, KeyError):
-            return "I need a valid hour and minute for the daily briefing time."
+            return "I need a valid hour and minute for the morning briefing time."
         if not (0 <= hour <= 23 and 0 <= minute <= 59):
             return "Hour must be 0-23 and minute 0-59."
         enabled = inp.get("enabled", True)
         briefing.set_config(sender, hour, minute, enabled)
         if enabled:
-            return f"Daily briefing set for {hour:02d}:{minute:02d} ✅"
-        return "Daily briefing turned off."
+            return f"Morning briefing set for {hour:02d}:{minute:02d} ✅"
+        return "Morning briefing turned off."
+
+    if tool == "set_evening_briefing":
+        try:
+            hour = int(inp["hour"])
+            minute = int(inp["minute"])
+        except (TypeError, ValueError, KeyError):
+            return "I need a valid hour and minute for the evening briefing time."
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return "Hour must be 0-23 and minute 0-59."
+        enabled = inp.get("enabled", True)
+        briefing.set_evening_config(sender, hour, minute, enabled)
+        if enabled:
+            return f"Evening briefing set for {hour:02d}:{minute:02d} ✅"
+        return "Evening briefing turned off."
+
+    return ""
+
+
+_HEBREW_DAY_LOOKUP = {
+    "sunday": "יום ראשון", "monday": "יום שני", "tuesday": "יום שלישי",
+    "wednesday": "יום רביעי", "thursday": "יום חמישי", "friday": "יום שישי", "saturday": "שבת",
+}
+
+
+def _handle_anchor_call(tool: str, inp: dict) -> str:
+    if tool == "add_anchor":
+        day = (inp.get("day") or "").strip().lower()
+        text = (inp.get("text") or "").strip()
+        time_hhmm = (inp.get("time") or "").strip() or None
+        if day not in anchors.DAYS:
+            return "I need a valid day of the week (sunday-saturday)."
+        if not text:
+            return "What is the anchor?"
+        if time_hhmm:
+            try:
+                datetime.strptime(time_hhmm, "%H:%M")
+            except ValueError:
+                return "Time must be in HH:MM format."
+        a = anchors.add_anchor(day, text, time_hhmm)
+        when = f" at {a.time}" if a.time else ""
+        return f"Anchor added ✅ — every {day.capitalize()}{when}: {text}"
+
+    if tool == "list_anchors":
+        all_a = anchors.list_all()
+        if not all_a:
+            return "You have no weekly anchors yet."
+        # Group by day, in week order starting Sunday.
+        lines = []
+        for day in anchors.DAYS:
+            bucket = sorted(
+                [a for a in all_a if a.day == day], key=lambda a: a.time or "00:00"
+            )
+            if not bucket:
+                continue
+            lines.append(f"{_HEBREW_DAY_LOOKUP[day]}:")
+            for a in bucket:
+                prefix = f"{a.time} — " if a.time else ""
+                lines.append(f"  • [{a.id}] {prefix}{a.text}")
+        return "Weekly anchors:\n" + "\n".join(lines)
+
+    if tool == "remove_anchor":
+        query = (inp.get("text") or "").strip()
+        if not query:
+            return "Which anchor should I remove?"
+        matches = anchors.find_matching(query)
+        if not matches:
+            return f"I couldn't find an anchor matching '{query}'."
+        if len(matches) > 1:
+            lines = [f"• [{a.id}] {_HEBREW_DAY_LOOKUP[a.day]}: {a.text}" for a in matches]
+            return f"Several anchors match '{query}' — which one? Reply with its id:\n" + "\n".join(lines)
+        a = matches[0]
+        anchors.remove_anchor(a.id)
+        return f"Removed anchor ✅ — {_HEBREW_DAY_LOOKUP[a.day]}: {a.text}"
+
+    if tool == "suppress_anchor_for_date":
+        query = (inp.get("text") or "").strip()
+        date = _valid_date(inp.get("date"))
+        if not query or not date:
+            return "I need both the anchor and the date (YYYY-MM-DD) to suppress."
+        matches = anchors.find_matching(query)
+        if not matches:
+            return f"I couldn't find an anchor matching '{query}'."
+        if len(matches) > 1:
+            lines = [f"• [{a.id}] {_HEBREW_DAY_LOOKUP[a.day]}: {a.text}" for a in matches]
+            return f"Several anchors match — which one? Reply with its id:\n" + "\n".join(lines)
+        a = matches[0]
+        anchors.suppress_for_date(a.id, date)
+        return f"Suppressed for {date} ✅ — {a.text} won't appear that day."
 
     return ""
 
@@ -621,6 +811,9 @@ async def _dispatch_tool(
 
     if tool in AGENDA_TOOLS:
         return _handle_agenda_call(sender, tool, inp)
+
+    if tool in ANCHOR_TOOLS:
+        return _handle_anchor_call(tool, inp)
 
     entity_id = inp.get("entity_id")
     entity_def = known_entities.get(entity_id)

@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     scheduled_actions_path: str = "/data/scheduled_actions.json"
     agenda_path: str = "/data/agenda.json"
     briefing_config_path: str = "/data/briefing_config.json"
+    anchors_path: str = "/data/anchors.json"
+    holidays_cache_path: str = "/data/holidays_cache.json"
     whisper_host: str = "192.168.10.150"
     whisper_port: int = 10300
 

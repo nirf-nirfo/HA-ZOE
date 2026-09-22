@@ -43,6 +43,12 @@ _ADD_AGENDA_ITEM = "add_agenda_item"
 _LIST_AGENDA = "list_agenda"
 _REMOVE_AGENDA_ITEM = "remove_agenda_item"
 _SET_DAILY_BRIEFING = "set_daily_briefing"
+_SET_EVENING_BRIEFING = "set_evening_briefing"
+
+_ADD_ANCHOR = "add_anchor"
+_LIST_ANCHORS = "list_anchors"
+_REMOVE_ANCHOR = "remove_anchor"
+_SUPPRESS_ANCHOR = "suppress_anchor_for_date"
 
 REMINDER_TOOLS = {
     _SET_REMINDER,
@@ -56,7 +62,8 @@ LIST_TOOLS = {_ADD_TO_LIST, _REMOVE_FROM_LIST, _CLEAR_LIST, _SHOW_LIST, _SHOW_AL
 MEMORY_TOOLS = {_REMEMBER, _FORGET}
 MONITOR_TOOLS = {_MONITOR_DEVICE, _LIST_MONITORS, _CANCEL_MONITOR}
 SCHEDULED_ACTION_TOOLS = {_SCHEDULE_ACTION, _LIST_SCHEDULED_ACTIONS, _CANCEL_SCHEDULED_ACTION}
-AGENDA_TOOLS = {_ADD_AGENDA_ITEM, _LIST_AGENDA, _REMOVE_AGENDA_ITEM, _SET_DAILY_BRIEFING}
+AGENDA_TOOLS = {_ADD_AGENDA_ITEM, _LIST_AGENDA, _REMOVE_AGENDA_ITEM, _SET_DAILY_BRIEFING, _SET_EVENING_BRIEFING}
+ANCHOR_TOOLS = {_ADD_ANCHOR, _LIST_ANCHORS, _REMOVE_ANCHOR, _SUPPRESS_ANCHOR}
 
 SYSTEM_PROMPT = (
     "You are ZOE, a personal assistant reachable over WhatsApp that also controls "
@@ -144,17 +151,29 @@ SYSTEM_PROMPT = (
     "cancel_scheduled_action to cancel one. A risky device (e.g. the lock) still asks for 'yes' "
     "confirmation at the moment it's due to run, exactly like an immediate risky action would — tell "
     "the user this when scheduling one. "
-    "ZOE can send a daily morning briefing summarizing that day's agenda. When the user wants to "
-    "feed you information ahead of time to be read out on a specific day (e.g. 'tomorrow I have a "
-    "9am meeting and a dentist at 5', 'on the 20th remind — well, tell me — I have the conference'), "
-    "call add_agenda_item with date (ISO date, YYYY-MM-DD, resolved from their wording relative to "
-    "the current date) and text. Use list_agenda to show what's on a given date (default today) and "
-    "remove_agenda_item to remove one by a text snippet. When the user wants to set up or change the "
-    "daily briefing itself — what time each morning ZOE should send it, or to turn it on/off — call "
-    "set_daily_briefing with hour, minute, and enabled. Agenda items are read out automatically at "
-    "that time; the user does not need to ask for the briefing each day once it's set up. This is "
-    "different from set_reminder (a reminder fires standalone at an exact time; an agenda item is "
-    "compiled into the single daily briefing message for its date). "
+    "ZOE sends TWO daily briefings: a morning briefing (full agenda for today) and an evening "
+    "briefing (short recap of today + a 1-2 line preview of tomorrow). Both are compiled from the "
+    "same sources: weekly anchors for that day-of-week, yearly reminders (birthdays) whose date "
+    "falls on that day, Jewish/Israeli holidays for that date (with school-vacation status), and "
+    "one-off agenda items for that date. "
+    "When the user wants to feed you information ahead of time for a specific day (e.g. 'tomorrow I "
+    "have a 9am meeting and a dentist at 5', 'on the 20th I have the conference'), call add_agenda_item "
+    "with date (ISO YYYY-MM-DD) and text — this is for ONE-OFF things on a specific date. Use "
+    "list_agenda to show what's on a date (default today) and remove_agenda_item to remove one. "
+    "For RECURRING weekly items — the family's regular schedule anchors, e.g. 'on Sundays Mili finishes "
+    "school at 13:00', 'every Tuesday I have soccer at 20:00', 'Mika finishes at 14:00 on Mondays' — "
+    "call add_anchor with day (sunday/monday/tuesday/wednesday/thursday/friday/saturday), text, and an "
+    "optional time (HH:MM, 24-hour Israel time). Anchors are household-wide (shared across all senders). "
+    "Use list_anchors to show all anchors. Call remove_anchor to delete an anchor permanently (by id or "
+    "text snippet). When the user says an anchor doesn't apply on ONE specific date ('no soccer this "
+    "Sunday', 'Mili has no חוג next Tuesday') — call suppress_anchor_for_date to cancel just that one "
+    "occurrence, keeping the weekly anchor otherwise intact. To REPLACE an anchor for a date with "
+    "something different, suppress the anchor and add an agenda item for that date. "
+    "To change the daily briefing times: call set_daily_briefing (morning) or set_evening_briefing "
+    "(evening) with hour, minute, and enabled. Both fire automatically each day at their configured "
+    "time. Note: yearly reminders (like birthdays) are surfaced in the morning briefing on their date "
+    "instead of firing as standalone messages — do not tell the user a yearly reminder will ping them "
+    "at 9am; it will appear in the morning briefing. "
     "For anything that is not about a known device, reminder, or list — general questions, writing or "
     "drafting text, current events, weather, or any other normal personal-assistant "
     "request — do not call any tool. Just answer directly and naturally in plain text, "
@@ -310,9 +329,8 @@ def _build_tools(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
         },
         {
             "name": _SET_DAILY_BRIEFING,
-            "description": "Configures ZOE's daily morning briefing: what local time to send it "
-            "each day, and whether it's on. Once set, the briefing is sent automatically every day "
-            "at that time with that day's agenda items.",
+            "description": "Configures ZOE's morning briefing: what local time to send it "
+            "each morning, and whether it's on. Once set, it's sent automatically every day.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -320,10 +338,74 @@ def _build_tools(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "minute": {"type": "integer", "description": "Minute (0-59)."},
                     "enabled": {
                         "type": "boolean",
-                        "description": "True to turn the daily briefing on (default), false to turn it off.",
+                        "description": "True to turn the morning briefing on (default), false to turn it off.",
                     },
                 },
                 "required": ["hour", "minute"],
+            },
+        },
+        {
+            "name": _SET_EVENING_BRIEFING,
+            "description": "Configures ZOE's evening briefing (default 20:00): short today-recap + "
+            "1-2 line preview of tomorrow. Set the local time and whether it's on.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "hour": {"type": "integer", "description": "Hour (0-23, Israel time)."},
+                    "minute": {"type": "integer", "description": "Minute (0-59)."},
+                    "enabled": {"type": "boolean", "description": "True to turn it on, false to turn it off."},
+                },
+                "required": ["hour", "minute"],
+            },
+        },
+        {
+            "name": _ADD_ANCHOR,
+            "description": "Adds a weekly recurring 'anchor': a household schedule item keyed by "
+            "day-of-week (e.g. 'on Sundays Mili finishes school at 13:00'). Household-wide.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "day": {
+                        "type": "string",
+                        "enum": ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"],
+                        "description": "Day of the week this anchor applies to.",
+                    },
+                    "text": {"type": "string", "description": "What happens (e.g. 'מילי מסיימת בית ספר')."},
+                    "time": {
+                        "type": "string",
+                        "description": "Optional 24-hour HH:MM (Israel time) when it happens. Omit if no specific time.",
+                    },
+                },
+                "required": ["day", "text"],
+            },
+        },
+        {
+            "name": _LIST_ANCHORS,
+            "description": "Lists all weekly anchors, grouped by day of the week.",
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": _REMOVE_ANCHOR,
+            "description": "Permanently removes a weekly anchor, identified by a snippet of its text or its id.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Anchor text snippet or id."},
+                },
+                "required": ["text"],
+            },
+        },
+        {
+            "name": _SUPPRESS_ANCHOR,
+            "description": "Cancels a single occurrence of a weekly anchor on one specific date, "
+            "without removing the weekly template. Use for 'no soccer this Sunday' type overrides.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Anchor text snippet or id."},
+                    "date": {"type": "string", "description": "ISO date YYYY-MM-DD to suppress on."},
+                },
+                "required": ["text", "date"],
             },
         },
         {
