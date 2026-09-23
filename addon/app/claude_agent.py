@@ -144,6 +144,13 @@ SYSTEM_PROMPT = (
     "that time and send a dynamically composed message — e.g. 'each evening check my tasks list and "
     "ask about status', 'every Friday remind me about weekend plans using the agenda' — do NOT use "
     "set_reminder for that; use schedule_check_in instead (see below). "
+    "For a WORK-SESSION cadence — the user is starting to work on something and wants you to check in "
+    "every hour (or every 30/90/etc. minutes) about progress — first call add_personal_task once per "
+    "thing they said they're working on, then call schedule_check_in with prompt='Read my open "
+    "personal tasks and ask about progress on each', when=<next fire, e.g. now+interval>, "
+    "interval_minutes=<the cadence>. When the user says 'stop asking' / 'מספיק' / 'תעצרי', call "
+    "cancel_check_in on that check-in. When they report a task done, also call complete_personal_task "
+    "so the next check-in doesn't ask about it again. "
     "When the user gives a calendar date without a year (e.g. '8th of January'), always pick "
     "the next occurrence of that date in the future — if it has already passed this year, use "
     "next year. send_at must never be in the past. "
@@ -644,26 +651,33 @@ def _build_tools(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "state your `prompt` tells her to read (lists, agenda, expenses, device status), and sends a "
             "dynamically composed WhatsApp message to the user. Distinct from set_reminder (static text) "
             "and from schedule_action (device command). Use for 'every evening at 18:00 check my task list "
-            "and ask what's done', 'every Friday at 14 remind me about the weekend using the agenda', etc. "
-            "The `prompt` field is an instruction to yourself for the moment of firing — write it as: "
-            "'Read <list>, then send the user a message that <what to say>'.",
+            "and ask what's done', 'every Friday at 14 remind me about the weekend using the agenda', or "
+            "'every hour ask me how progress is going on my open personal tasks'. The `prompt` field is "
+            "an instruction to yourself for the moment of firing.",
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "prompt": {
                         "type": "string",
                         "description": "Short instruction to yourself for when the check-in fires. State "
-                        "WHAT to read (e.g. 'read the tasks list') and WHAT MESSAGE to send the user (e.g. "
-                        "'ask which items are done'). Written in the second person to future-you.",
+                        "WHAT to read (e.g. 'read my open personal tasks') and WHAT MESSAGE to send the "
+                        "user (e.g. 'ask about progress on each'). Written in the second person to future-you.",
                     },
                     "when": {
                         "type": "string",
-                        "description": "ISO 8601 datetime for the first (or only) fire, Israel time. Must be in the future.",
+                        "description": "ISO 8601 datetime for the FIRST fire, Israel time. Must be in the future.",
                     },
                     "recurrence": {
                         "type": "string",
                         "enum": ["daily", "weekly", "monthly", "yearly"],
-                        "description": "Optional. Omit for a one-time check-in.",
+                        "description": "Optional. Named recurrence for daily-or-longer cadences. Omit for "
+                        "a one-time check-in or when using interval_minutes below.",
+                    },
+                    "interval_minutes": {
+                        "type": "integer",
+                        "description": "Optional. Fire every N minutes (e.g. 30, 60, 120). Use this for "
+                        "sub-daily 'work-session' cadences like 'check on me every hour'. Overrides "
+                        "recurrence when both are set. Minimum 15.",
                     },
                 },
                 "required": ["prompt", "when"],

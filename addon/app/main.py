@@ -1130,10 +1130,22 @@ def _handle_check_in_call(sender: str, tool: str, inp: dict) -> str:
         recurrence = inp.get("recurrence")
         if recurrence not in check_ins.RECURRENCES:
             recurrence = None
-        c = check_ins.add(sender, prompt, when, recurrence)
+        interval_minutes = inp.get("interval_minutes")
+        try:
+            interval_minutes = int(interval_minutes) if interval_minutes is not None else None
+        except (TypeError, ValueError):
+            interval_minutes = None
+        if interval_minutes is not None and interval_minutes < 15:
+            interval_minutes = 15  # loop only ticks once/minute; guard against runaway
+        c = check_ins.add(sender, prompt, when, recurrence, interval_minutes)
         when_str = datetime.fromtimestamp(c.next_at, tz=_IL_TZ).strftime("%d/%m/%Y %H:%M")
-        repeat = f" (repeats {recurrence})" if recurrence else ""
-        return f"Check-in scheduled ✅{repeat} — {when_str} — I'll fetch what's needed and message you then."
+        if interval_minutes:
+            cadence = f" (every {interval_minutes} min)"
+        elif recurrence:
+            cadence = f" (repeats {recurrence})"
+        else:
+            cadence = ""
+        return f"Check-in scheduled ✅{cadence} — first at {when_str}."
 
     if tool == "list_check_ins":
         pending = check_ins.list_for_sender(sender)
@@ -1142,8 +1154,13 @@ def _handle_check_in_call(sender: str, tool: str, inp: dict) -> str:
         lines = []
         for c in pending:
             when = datetime.fromtimestamp(c.next_at, tz=_IL_TZ).strftime("%d/%m/%Y %H:%M")
-            repeat = f" [{c.recurrence}]" if c.recurrence else ""
-            lines.append(f"• [{c.id}] {when}{repeat} — {c.prompt}")
+            if c.interval_minutes:
+                cadence = f" [every {c.interval_minutes}m]"
+            elif c.recurrence:
+                cadence = f" [{c.recurrence}]"
+            else:
+                cadence = ""
+            lines.append(f"• [{c.id}] {when}{cadence} — {c.prompt}")
         return "Check-ins:\n" + "\n".join(lines)
 
     if tool == "cancel_check_in":

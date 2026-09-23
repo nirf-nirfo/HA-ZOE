@@ -28,6 +28,10 @@ class CheckIn:
     prompt: str  # short instruction to ZOE-at-that-time (what to read, what to ask)
     next_at: float  # Unix ts
     recurrence: str | None = None
+    # Overrides `recurrence` when set: fire every N minutes (used for "check every
+    # hour on my progress" work-session polling; sub-daily cadences that daily/weekly
+    # can't express).
+    interval_minutes: int | None = None
 
 
 def _load() -> list[CheckIn]:
@@ -77,18 +81,35 @@ def _next_occurrence(next_at: float, recurrence: str, now: float) -> float:
             return ts
 
 
-def add(sender: str, prompt: str, next_at: float, recurrence: str | None = None) -> CheckIn:
+def add(
+    sender: str,
+    prompt: str,
+    next_at: float,
+    recurrence: str | None = None,
+    interval_minutes: int | None = None,
+) -> CheckIn:
     items = _load()
     c = CheckIn(
         id=str(uuid.uuid4())[:6],
         sender=sender,
         prompt=prompt,
         next_at=next_at,
-        recurrence=recurrence if recurrence in RECURRENCES else None,
+        # interval_minutes wins over recurrence if both are somehow set.
+        recurrence=None if interval_minutes else (recurrence if recurrence in RECURRENCES else None),
+        interval_minutes=int(interval_minutes) if interval_minutes else None,
     )
     items.append(c)
     _save(items)
     return c
+
+
+def _next_from_interval(next_at: float, interval_minutes: int, now: float) -> float:
+    """Steps `next_at` forward by `interval_minutes` until it lands strictly after
+    `now`. Catches up gracefully if the loop missed ticks (e.g. Anthropic outage)."""
+    ts = next_at + interval_minutes * 60
+    while ts <= now:
+        ts += interval_minutes * 60
+    return ts
 
 
 def list_for_sender(sender: str) -> list[CheckIn]:
@@ -127,7 +148,9 @@ def pop_due() -> list[CheckIn]:
         return []
     remaining = [c for c in items if c.next_at > now]
     for c in due:
-        if c.recurrence in RECURRENCES:
+        if c.interval_minutes:
+            remaining.append(replace(c, next_at=_next_from_interval(c.next_at, c.interval_minutes, now)))
+        elif c.recurrence in RECURRENCES:
             remaining.append(replace(c, next_at=_next_occurrence(c.next_at, c.recurrence, now)))
     _save(remaining)
     return due
