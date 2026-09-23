@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request, Response
 from app.claude_agent import (
     AGENDA_TOOLS,
     ANCHOR_TOOLS,
+    CONVERSATION_TOOLS,
     LIST_TOOLS,
     MEMORY_TOOLS,
     MONITOR_TOOLS,
@@ -24,7 +25,7 @@ from app.ha_client import ha_client
 from app.logging_config import logger
 from app.lists import add_item, clear_list, get_all_list_names, get_list, remove_items
 from app.memory import forget, remember
-from app import agenda, anchors, briefing, conversation, holidays, monitors, scheduled_actions
+from app import agenda, anchors, briefing, conversation, conversation_log, holidays, monitors, scheduled_actions
 from app import reminders as reminders_mod
 from app.reminders import (
     RECURRENCES,
@@ -789,6 +790,29 @@ def _handle_anchor_call(tool: str, inp: dict) -> str:
     return ""
 
 
+def _handle_conversation_call(sender: str, tool: str, inp: dict) -> str:
+    if tool == "search_past_conversations":
+        query = (inp.get("query") or "").strip()
+        if not query:
+            return "What should I search for?"
+        days_back = inp.get("days_back")
+        try:
+            days_back = int(days_back) if days_back is not None else None
+        except (TypeError, ValueError):
+            days_back = None
+        results = conversation_log.search(sender, query, days_back)
+        if not results:
+            scope = f" in the last {days_back} days" if days_back else ""
+            return f"I couldn't find any past conversation mentioning '{query}'{scope}."
+        blocks = []
+        for e in results:
+            when = datetime.fromtimestamp(e["ts"], tz=_IL_TZ).strftime("%d/%m/%Y %H:%M")
+            blocks.append(f"[{when}]\nUser: {e['user']}\nZOE: {e['assistant']}")
+        return f"Past exchanges mentioning '{query}' (newest first):\n\n" + "\n\n".join(blocks)
+
+    return ""
+
+
 async def _dispatch_tool(
     sender: str, tool: str, inp: dict, known_entities: dict, pending_actions: list
 ) -> str:
@@ -814,6 +838,9 @@ async def _dispatch_tool(
 
     if tool in ANCHOR_TOOLS:
         return _handle_anchor_call(tool, inp)
+
+    if tool in CONVERSATION_TOOLS:
+        return _handle_conversation_call(sender, tool, inp)
 
     entity_id = inp.get("entity_id")
     entity_def = known_entities.get(entity_id)
@@ -869,6 +896,7 @@ async def _handle_message(sender: str, text: str) -> None:
         reply = "\n".join(replies)
         await send_message(sender, reply)
         conversation.record(sender, text, reply)
+        conversation_log.append(sender, text, reply)
         return
 
     known_entities = get_known_entities()
@@ -911,7 +939,9 @@ async def _handle_message(sender: str, text: str) -> None:
     if final_text:
         await send_message(sender, final_text)
         conversation.record(sender, text, final_text)
+        conversation_log.append(sender, text, final_text)
     elif not pending_actions:
         fallback = "I'm not sure what you mean — could you rephrase?"
         await send_message(sender, fallback)
         conversation.record(sender, text, fallback)
+        conversation_log.append(sender, text, fallback)

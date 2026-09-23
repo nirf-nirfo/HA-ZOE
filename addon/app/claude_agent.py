@@ -50,6 +50,8 @@ _LIST_ANCHORS = "list_anchors"
 _REMOVE_ANCHOR = "remove_anchor"
 _SUPPRESS_ANCHOR = "suppress_anchor_for_date"
 
+_SEARCH_CONVERSATIONS = "search_past_conversations"
+
 REMINDER_TOOLS = {
     _SET_REMINDER,
     _LIST_REMINDERS,
@@ -64,6 +66,7 @@ MONITOR_TOOLS = {_MONITOR_DEVICE, _LIST_MONITORS, _CANCEL_MONITOR}
 SCHEDULED_ACTION_TOOLS = {_SCHEDULE_ACTION, _LIST_SCHEDULED_ACTIONS, _CANCEL_SCHEDULED_ACTION}
 AGENDA_TOOLS = {_ADD_AGENDA_ITEM, _LIST_AGENDA, _REMOVE_AGENDA_ITEM, _SET_DAILY_BRIEFING, _SET_EVENING_BRIEFING}
 ANCHOR_TOOLS = {_ADD_ANCHOR, _LIST_ANCHORS, _REMOVE_ANCHOR, _SUPPRESS_ANCHOR}
+CONVERSATION_TOOLS = {_SEARCH_CONVERSATIONS}
 
 SYSTEM_PROMPT = (
     "You are ZOE, a personal assistant reachable over WhatsApp that also controls "
@@ -190,6 +193,13 @@ SYSTEM_PROMPT = (
     "'my wife is Dana', 'I like the blinds at 50%'), call remember to save it. Do NOT remember "
     "one-off or transient things (a single shopping item, a specific reminder) — those have their "
     "own tools. When a saved fact becomes wrong or the user asks you to forget it, call forget. "
+    "ZOE keeps a searchable log of every past conversation with each user for up to 90 days. The last "
+    "24 hours of exchanges are ALREADY visible to you in this thread (the messages prepended to the "
+    "conversation); anything older lives only in the log. When the user references something you "
+    "discussed before that you can't see in the current thread — 'what did I tell you about X?', "
+    "'remind me about the article last week', 'the plan we made for Y' — call "
+    "search_past_conversations with a distinctive keyword. Only call it when the referenced context "
+    "isn't in what you can already see; don't search for things obviously in this thread. "
     "You work in a tool-use loop: after you call a tool you will be shown its result, and you "
     "may call more tools before answering. Chain steps when a task needs it — e.g. call "
     "get_device_status, read the result, then decide whether to act; or call list_reminders to "
@@ -639,6 +649,29 @@ def _build_tools(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "text": {"type": "string", "description": "Device-name snippet or monitor id."},
                 },
                 "required": ["text"],
+            },
+        },
+        {
+            "name": _SEARCH_CONVERSATIONS,
+            "description": "Searches this sender's past conversations with ZOE for a keyword or phrase. "
+            "Returns matching exchanges (both what the user said and what ZOE replied) with dates, "
+            "newest first. Use when the user references something you discussed earlier that isn't in "
+            "the current thread anymore — e.g. 'what did I tell you about X?', 'the article from last "
+            "week', 'remind me what we said about the trip'. Retention is 90 days.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "A distinctive word or short phrase to search for.",
+                    },
+                    "days_back": {
+                        "type": "integer",
+                        "description": "Optional: only look at exchanges from the last N days. "
+                        "Omit to search all available history.",
+                    },
+                },
+                "required": ["query"],
             },
         },
         {"type": "web_search_20250305", "name": "web_search", "max_uses": 3},

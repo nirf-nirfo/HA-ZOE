@@ -1,29 +1,57 @@
+import json
 import time
+from pathlib import Path
 
-# Short-term per-sender conversation memory, so follow-ups like "turn it on" or
-# "cancel it" resolve against what was just discussed. In-process and ephemeral by
-# design; cleared after a period of silence so stale context can't leak into a new
-# topic (and so a restart simply starts the thread fresh).
+from app.logging_config import logger
+from app.settings import settings
 
-_history: dict[str, list[dict]] = {}
-_last_seen: dict[str, float] = {}
+# Short-term per-sender conversation memory: prior user/assistant turns so
+# follow-ups like "turn it on" or "cancel it" resolve against what was just
+# discussed. Persisted so an add-on restart doesn't drop the thread mid-way.
+# Held to a 24h idle window and a rolling exchange cap — anything older is
+# available only through the searchable long-term log (conversation_log.py).
 
-_MAX_MESSAGES = 10  # keep roughly the last 5 exchanges
-_TTL_SECONDS = 30 * 60  # forget the thread after 30 minutes idle
+_MAX_MESSAGES = 40  # 20 exchanges
+_TTL_SECONDS = 24 * 60 * 60
+
+
+def _load() -> dict:
+    path = Path(settings.conversation_path)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.warning("Could not load conversation file, starting fresh")
+        return {}
+
+
+def _save(data: dict) -> None:
+    path = Path(settings.conversation_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
 
 def recent(sender: str) -> list[dict]:
-    """Prior user/assistant turns for this sender, or [] if the thread went idle."""
-    if time.time() - _last_seen.get(sender, 0.0) > _TTL_SECONDS:
-        _history.pop(sender, None)
-        _last_seen.pop(sender, None)
-    return list(_history.get(sender, []))
+    """Prior user/assistant turns for this sender, or [] if the thread went idle
+    past the TTL. Returned as chat-formatted messages ready to prepend to a run."""
+    data = _load()
+    entry = data.get(sender)
+    if not entry:
+        return []
+    if time.time() - entry.get("last_seen", 0.0) > _TTL_SECONDS:
+        return []
+    return list(entry.get("turns", []))
 
 
 def record(sender: str, user_text: str, assistant_text: str) -> None:
-    """Appends one exchange to the sender's short-term history, trimmed to the window."""
-    turns = _history.get(sender, [])
+    """Appends one exchange to the sender's rolling short-term history."""
+    data = _load()
+    entry = data.get(sender) or {"turns": [], "last_seen": 0.0}
+    turns = entry["turns"]
     turns.append({"role": "user", "content": user_text})
     turns.append({"role": "assistant", "content": assistant_text})
-    _history[sender] = turns[-_MAX_MESSAGES:]
-    _last_seen[sender] = time.time()
+    entry["turns"] = turns[-_MAX_MESSAGES:]
+    entry["last_seen"] = time.time()
+    data[sender] = entry
+    _save(data)

@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     briefing_config_path: str = "/data/briefing_config.json"
     anchors_path: str = "/data/anchors.json"
     holidays_cache_path: str = "/data/holidays_cache.json"
+    conversation_path: str = "/data/conversation.json"
+    conversation_log_path: str = "/data/conversation_log.json"
     whisper_host: str = "192.168.10.150"
     whisper_port: int = 10300
 
