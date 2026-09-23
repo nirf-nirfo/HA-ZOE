@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -10,7 +11,9 @@ from fastapi import FastAPI, Request, Response
 from app.claude_agent import (
     AGENDA_TOOLS,
     ANCHOR_TOOLS,
+    BROADCAST_TOOLS,
     CONVERSATION_TOOLS,
+    EXPENSE_TOOLS,
     LIST_TOOLS,
     MEMORY_TOOLS,
     MONITOR_TOOLS,
@@ -25,7 +28,10 @@ from app.ha_client import ha_client
 from app.logging_config import logger
 from app.lists import add_item, clear_list, get_all_list_names, get_list, remove_items
 from app.memory import forget, remember
-from app import agenda, anchors, briefing, conversation, conversation_log, holidays, monitors, scheduled_actions
+from app import (
+    agenda, anchors, briefing, conversation, conversation_log, expenses,
+    holidays, monitors, recurring_expenses, scheduled_actions,
+)
 from app import reminders as reminders_mod
 from app.reminders import (
     RECURRENCES,
@@ -42,7 +48,7 @@ from app.reminders import (
 )
 from app.settings import settings
 from app.transcribe import transcribe_audio
-from app.whatsapp import extract_message, send_message, verify_signature
+from app.whatsapp import download_media, extract_message, send_message, verify_signature
 
 app = FastAPI(title="ZOE")
 
@@ -112,6 +118,19 @@ async def _compile_morning_briefing(sender: str, dt: datetime) -> str:
     if agenda_items:
         parts.append("📌 היום:\n" + "\n".join(f"• {i.text}" for i in agenda_items))
 
+    # On the 1st of the month, tack on last month's expense summary.
+    if dt.day == 1:
+        s = expenses.summary(period="last_month")
+        if s["count"] > 0:
+            lines = [f"💰 סיכום החודש הקודם ({s['start']} → {s['end']}):",
+                     f"סה״כ {_fmt_ils(s['total'])} ({s['count']} הוצאות)"]
+            top_cats = list(s["by_category"].items())[:3]
+            if top_cats:
+                lines.append("קטגוריות מובילות:")
+                for cat, amt in top_cats:
+                    lines.append(f"  • {cat}: {_fmt_ils(amt)}")
+            parts.append("\n".join(lines))
+
     return "\n\n".join(parts)
 
 
@@ -148,6 +167,9 @@ async def _compile_evening_briefing(sender: str, today: datetime, tomorrow: date
     lines = ["🌙 ערב טוב!"]
     if today_summary:
         lines.append(f"היום היה: {today_summary}")
+    spent = expenses.total_for_sender_on_date(sender, today_str)
+    if spent > 0:
+        lines.append(f"💰 הוצאת היום: {_fmt_ils(spent)}")
     if tomorrow_summary:
         lines.append(f"מחר ({_hebrew_day(tomorrow)}): {tomorrow_summary}")
     else:
@@ -184,6 +206,11 @@ async def _daily_briefing_loop() -> None:
                             logger.info("Sent evening briefing to %s for %s", cfg.sender, today_str)
                 except Exception:
                     logger.exception("Daily briefing loop: failed for %s", cfg.sender)
+            # Insert any recurring household bills due today (idempotent).
+            try:
+                recurring_expenses.insert_due_today()
+            except Exception:
+                logger.exception("Daily briefing loop: recurring expenses tick failed")
             # Keep stores tidy; nothing before today is ever read again.
             agenda.purge_before(today_str)
             anchors.purge_suppressions_before(today_str)
@@ -293,27 +320,55 @@ async def receive_webhook(request: Request) -> Response:
     if parsed is None:
         return Response(status_code=200)
 
-    sender, text, audio_id = parsed
-    allowed = {n.strip() for n in settings.allowed_sender_numbers.split(",")}
-    if sender not in allowed:
-        logger.warning("Rejected message from unauthorized sender %s", sender)
+    if parsed.sender not in _allowed_senders():
+        logger.warning("Rejected message from unauthorized sender %s", parsed.sender)
         return Response(status_code=200)
 
-    asyncio.create_task(_process_message(sender, text, audio_id))
+    asyncio.create_task(_process_message(parsed))
     return Response(status_code=200)
 
 
-async def _process_message(sender: str, text: str | None, audio_id: str | None) -> None:
-    if audio_id:
+def _allowed_senders() -> set[str]:
+    return {n.strip() for n in settings.allowed_sender_numbers.split(",") if n.strip()}
+
+
+async def _process_message(parsed) -> None:
+    sender = parsed.sender
+    text = parsed.text
+    image_block = None
+
+    if parsed.audio_id:
         logger.info("Inbound voice from %s, transcribing...", sender)
-        text = await transcribe_audio(audio_id)
+        text = await transcribe_audio(parsed.audio_id)
         if not text:
             await send_message(sender, "Sorry, I couldn't understand the voice message.")
             return
         logger.info("Transcribed voice from %s: %s", sender, text)
 
+    if parsed.image_id:
+        try:
+            img_bytes, mime = await download_media(parsed.image_id)
+        except Exception:
+            logger.exception("Failed to download image from %s", sender)
+            await send_message(sender, "Sorry, I couldn't download that image.")
+            return
+        image_block = {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": mime,
+                "data": base64.b64encode(img_bytes).decode(),
+            },
+        }
+        # Caption becomes the accompanying text; if none, give Claude a hint.
+        text = parsed.image_caption or text or "(תמונה)"
+        logger.info("Inbound image from %s (caption=%r)", sender, parsed.image_caption)
+
+    if text is None:
+        return
+
     logger.info("Inbound from %s: %s", sender, text)
-    await _handle_message(sender, text)
+    await _handle_message(sender, text, image_block)
 
 
 async def _execute_control_action(entity_id: str, domain: str, service: str, service_data: dict, description: str) -> str:
@@ -790,6 +845,159 @@ def _handle_anchor_call(tool: str, inp: dict) -> str:
     return ""
 
 
+def _fmt_ils(x: float) -> str:
+    return f"₪{x:,.0f}" if float(x).is_integer() else f"₪{x:,.2f}"
+
+
+def _handle_expense_call(sender: str, tool: str, inp: dict) -> str:
+    if tool == "add_expense":
+        try:
+            amount = float(inp["amount"])
+        except (KeyError, TypeError, ValueError):
+            return "I need a numeric amount."
+        if amount <= 0:
+            return "Amount must be positive."
+        category = inp.get("category")
+        if category not in expenses.CATEGORIES:
+            return f"Category must be one of: {', '.join(expenses.CATEGORIES)}."
+        payment_method = inp.get("payment_method") or "לא צוין"
+        if payment_method not in expenses.PAYMENT_METHODS:
+            return f"Payment method must be one of: {', '.join(expenses.PAYMENT_METHODS)}."
+        description = (inp.get("description") or "").strip()
+        date = _valid_date(inp.get("date"))
+        source = "receipt" if (inp.get("date") is None and "raw_message" not in inp) else "manual"
+        # We can't easily know receipt-vs-manual from tool inputs alone; keep it simple:
+        source = "manual"
+        e = expenses.add(sender, amount, category, payment_method, description, source=source, date=date)
+        payment_note = f" ({payment_method})" if payment_method != "לא צוין" else ""
+        desc_note = f" — {description}" if description else ""
+        return f"נרשם ✅ {_fmt_ils(amount)} · {category}{payment_note}{desc_note} [id: {e.id}]"
+
+    if tool == "delete_last_expense":
+        removed = expenses.delete_last_manual(sender)
+        if not removed:
+            return "אין הוצאה למחיקה 🤷"
+        return (
+            f"🗑️ נמחק: {_fmt_ils(removed.amount)} — {removed.category}"
+            + (f" ({removed.description})" if removed.description else "")
+        )
+
+    if tool == "fix_last_expense":
+        try:
+            new_amount = float(inp["new_amount"])
+        except (KeyError, TypeError, ValueError):
+            return "I need a numeric new_amount."
+        if new_amount <= 0:
+            return "Amount must be positive."
+        updated = expenses.update_last_amount(sender, new_amount)
+        if not updated:
+            return "אין הוצאה לתיקון 🤷"
+        return f"✏️ תוקן: {_fmt_ils(new_amount)} — {updated.category} ({updated.description or '—'})"
+
+    if tool == "list_recent_expenses":
+        try:
+            limit = int(inp.get("limit") or 10)
+        except (TypeError, ValueError):
+            limit = 10
+        limit = max(1, min(limit, 50))
+        sender_filter = sender if inp.get("sender_only") else None
+        recent = expenses.list_recent(limit, sender_filter)
+        if not recent:
+            return "אין הוצאות רשומות."
+        lines = []
+        for e in recent:
+            who = "" if sender_filter else f" · {e.sender}"
+            pay = f" · {e.payment_method}" if e.payment_method != "לא צוין" else ""
+            desc = f" — {e.description}" if e.description else ""
+            lines.append(f"• [{e.id}] {e.date} · {_fmt_ils(e.amount)} · {e.category}{pay}{who}{desc}")
+        header = "ההוצאות שלך" if sender_filter else "הוצאות אחרונות (משפחתי)"
+        return f"{header}:\n" + "\n".join(lines)
+
+    if tool == "expense_summary":
+        period = inp.get("period")
+        start = _valid_date(inp.get("start"))
+        end = _valid_date(inp.get("end"))
+        category = inp.get("category")
+        if category and category not in expenses.CATEGORIES:
+            return f"Category must be one of: {', '.join(expenses.CATEGORIES)}."
+        sender_filter = sender if inp.get("sender_only") else None
+        s = expenses.summary(
+            period=period, start=start, end=end, category=category, sender=sender_filter,
+        )
+        if s["count"] == 0:
+            return f"אין הוצאות בין {s['start']} ל-{s['end']}."
+        lines = [
+            f"סיכום {s['start']} → {s['end']}:",
+            f"סה״כ: {_fmt_ils(s['total'])} ({s['count']} הוצאות)",
+            "",
+            "לפי מדווח:",
+        ]
+        for phone, amt in s["by_sender"].items():
+            lines.append(f"  • {phone}: {_fmt_ils(amt)}")
+        lines.append("")
+        lines.append("לפי קטגוריה:")
+        for cat, amt in s["by_category"].items():
+            pct = int(round(amt / s["total"] * 100)) if s["total"] else 0
+            lines.append(f"  • {cat}: {_fmt_ils(amt)} ({pct}%)")
+        lines.append("")
+        lines.append("לפי אמצעי תשלום:")
+        for method, amt in s["by_payment_method"].items():
+            lines.append(f"  • {method}: {_fmt_ils(amt)}")
+        return "\n".join(lines)
+
+    if tool == "add_recurring_expense":
+        name = (inp.get("name") or "").strip()
+        if not name:
+            return "I need a name for the recurring bill."
+        try:
+            amount = float(inp["amount"])
+        except (KeyError, TypeError, ValueError):
+            return "I need a numeric amount."
+        try:
+            day = int(inp["day_of_month"])
+        except (KeyError, TypeError, ValueError):
+            return "I need a day_of_month (1-31)."
+        if not 1 <= day <= 31:
+            return "day_of_month must be between 1 and 31."
+        month_pattern = (inp.get("month_pattern") or "monthly").strip() or "monthly"
+        category = inp.get("category") or "חשבונות"
+        if category not in expenses.CATEGORIES:
+            return f"Category must be one of: {', '.join(expenses.CATEGORIES)}."
+        payment_method = inp.get("payment_method") or "לא צוין"
+        if payment_method not in expenses.PAYMENT_METHODS:
+            return f"Payment method must be one of: {', '.join(expenses.PAYMENT_METHODS)}."
+        r = recurring_expenses.add(name, amount, day, month_pattern, category, payment_method)
+        pattern_note = "" if r.month_pattern == "monthly" else f" (חודשים: {r.month_pattern})"
+        return f"🔄 נוספה הוצאה קבועה [{r.id}]: {r.name} — {_fmt_ils(r.amount)} כל {r.day_of_month} לחודש{pattern_note}"
+
+    if tool == "list_recurring_expenses":
+        items = recurring_expenses.list_all()
+        if not items:
+            return "אין הוצאות קבועות רשומות."
+        lines = ["🔄 הוצאות קבועות:"]
+        for r in items:
+            pay = f" · {r.payment_method}" if r.payment_method != "לא צוין" else ""
+            pattern_note = "" if r.month_pattern == "monthly" else f" [{r.month_pattern}]"
+            lines.append(f"• [{r.id}] {r.name} — {_fmt_ils(r.amount)} (יום {r.day_of_month}){pattern_note}{pay}")
+        return "\n".join(lines)
+
+    if tool == "remove_recurring_expense":
+        query = (inp.get("text") or "").strip()
+        if not query:
+            return "Which recurring bill should I remove?"
+        matches = recurring_expenses.find_matching(query)
+        if not matches:
+            return f"לא נמצאה הוצאה קבועה תואמת '{query}'."
+        if len(matches) > 1:
+            lines = [f"• [{r.id}] {r.name} — {_fmt_ils(r.amount)}" for r in matches]
+            return f"כמה הוצאות תואמות '{query}' — איזו? השב עם id:\n" + "\n".join(lines)
+        r = matches[0]
+        recurring_expenses.remove(r.id)
+        return f"🗑️ הוסרה הוצאה קבועה: {r.name} — {_fmt_ils(r.amount)}"
+
+    return ""
+
+
 def _handle_conversation_call(sender: str, tool: str, inp: dict) -> str:
     if tool == "search_past_conversations":
         query = (inp.get("query") or "").strip()
@@ -842,6 +1050,9 @@ async def _dispatch_tool(
     if tool in CONVERSATION_TOOLS:
         return _handle_conversation_call(sender, tool, inp)
 
+    if tool in EXPENSE_TOOLS:
+        return _handle_expense_call(sender, tool, inp)
+
     entity_id = inp.get("entity_id")
     entity_def = known_entities.get(entity_id)
     if entity_def is None:
@@ -882,7 +1093,18 @@ async def _dispatch_tool(
     return f"Unknown tool: {tool}"
 
 
-async def _handle_message(sender: str, text: str) -> None:
+async def _broadcast(final_text: str, primary_sender: str, others_only: bool = False) -> None:
+    """Sends `final_text` to household senders. If others_only, skips primary (who already got it)."""
+    for phone in _allowed_senders():
+        if others_only and phone == primary_sender:
+            continue
+        try:
+            await send_message(phone, final_text)
+        except Exception:
+            logger.exception("Broadcast to %s failed (24h window closed?)", phone)
+
+
+async def _handle_message(sender: str, text: str, image_block: dict | None = None) -> None:
     confirmed = pop_if_confirmed(sender, text)
     if confirmed is not None:
         replies = []
@@ -903,10 +1125,16 @@ async def _handle_message(sender: str, text: str) -> None:
     states = await ha_client.get_states(list(known_entities.keys()))
 
     # Prepend recent turns so follow-ups ("turn it on", "cancel it") have context.
+    context_text = initial_context(text, states, sender)
+    if image_block is not None:
+        first_user_content = [image_block, {"type": "text", "text": context_text}]
+    else:
+        first_user_content = context_text
     messages: list = conversation.recent(sender) + [
-        {"role": "user", "content": initial_context(text, states, sender)}
+        {"role": "user", "content": first_user_content}
     ]
     pending_actions: list = []
+    tools_used: set[str] = set()
     final_text = ""
 
     for _ in range(_MAX_AGENT_ITERS):
@@ -918,6 +1146,7 @@ async def _handle_message(sender: str, text: str) -> None:
             results = []
             for tu in tool_uses:
                 logger.info("Tool call: %s %s", tu.name, tu.input)
+                tools_used.add(tu.name)
                 result = await _dispatch_tool(sender, tu.name, tu.input, known_entities, pending_actions)
                 results.append({"type": "tool_result", "tool_use_id": tu.id, "content": result})
             messages.append({"role": "user", "content": results})
@@ -936,8 +1165,13 @@ async def _handle_message(sender: str, text: str) -> None:
     if pending_actions:
         store_pending(sender, pending_actions)
 
+    # Broadcast expense-related outcomes to the whole household; keep everything else private.
+    should_broadcast = bool(tools_used & BROADCAST_TOOLS)
+
     if final_text:
         await send_message(sender, final_text)
+        if should_broadcast:
+            await _broadcast(final_text, sender, others_only=True)
         conversation.record(sender, text, final_text)
         conversation_log.append(sender, text, final_text)
     elif not pending_actions:

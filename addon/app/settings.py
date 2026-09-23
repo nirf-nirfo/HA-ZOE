@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     holidays_cache_path: str = "/data/holidays_cache.json"
     conversation_path: str = "/data/conversation.json"
     conversation_log_path: str = "/data/conversation_log.json"
+    expenses_path: str = "/data/expenses.json"
+    recurring_expenses_path: str = "/data/recurring_expenses.json"
     whisper_host: str = "192.168.10.150"
     whisper_port: int = 10300
 

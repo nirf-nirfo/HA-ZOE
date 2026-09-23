@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -65,13 +66,18 @@ def _is_duplicate(message_id: str) -> bool:
     return False
 
 
-def extract_message(payload: dict[str, Any]) -> tuple[str, str, str | None] | None:
-    """Pulls (sender, text_or_None, audio_media_id_or_None) from a WhatsApp webhook payload.
+@dataclass
+class ParsedMessage:
+    sender: str
+    text: str | None = None
+    audio_id: str | None = None
+    image_id: str | None = None
+    image_caption: str | None = None
 
-    Returns None if the payload contains no actionable message or is a duplicate.
-    For text messages: (sender, text, None)
-    For audio messages: (sender, None, media_id)
-    """
+
+def extract_message(payload: dict[str, Any]) -> ParsedMessage | None:
+    """Pulls one actionable message out of a WhatsApp webhook payload; None if
+    the payload has no message or is a Meta redelivery of one already handled."""
     try:
         entry = payload["entry"][0]
         change = entry["changes"][0]["value"]
@@ -87,13 +93,34 @@ def extract_message(payload: dict[str, Any]) -> tuple[str, str, str | None] | No
         sender = message["from"]
         msg_type = message.get("type")
         if msg_type == "text":
-            return sender, message["text"]["body"], None
+            return ParsedMessage(sender=sender, text=message["text"]["body"])
         if msg_type == "audio":
-            return sender, None, message["audio"]["id"]
+            return ParsedMessage(sender=sender, audio_id=message["audio"]["id"])
+        if msg_type == "image":
+            img = message["image"]
+            return ParsedMessage(
+                sender=sender, image_id=img["id"], image_caption=img.get("caption"),
+            )
         return None
     except (KeyError, IndexError, TypeError):
         logger.warning("Could not parse WhatsApp webhook payload: %s", payload)
         return None
+
+
+async def download_media(media_id: str) -> tuple[bytes, str]:
+    """Downloads WhatsApp media (image/audio/document) by its id; returns
+    (bytes, mime_type). Two-hop: fetch a signed URL, then fetch the bytes."""
+    url = f"{GRAPH_API_BASE}/{media_id}"
+    headers = {"Authorization": f"Bearer {settings.whatsapp_access_token}"}
+    async with httpx.AsyncClient(timeout=30) as client:
+        meta = await client.get(url, headers=headers)
+        meta.raise_for_status()
+        info = meta.json()
+        media_url = info["url"]
+        mime_type = info.get("mime_type", "application/octet-stream")
+        data = await client.get(media_url, headers=headers)
+        data.raise_for_status()
+        return data.content, mime_type
 
 
 async def send_message(to: str, text: str) -> None:

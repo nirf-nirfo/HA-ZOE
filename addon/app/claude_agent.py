@@ -52,6 +52,15 @@ _SUPPRESS_ANCHOR = "suppress_anchor_for_date"
 
 _SEARCH_CONVERSATIONS = "search_past_conversations"
 
+_ADD_EXPENSE = "add_expense"
+_DELETE_LAST_EXPENSE = "delete_last_expense"
+_FIX_LAST_EXPENSE = "fix_last_expense"
+_LIST_RECENT_EXPENSES = "list_recent_expenses"
+_EXPENSE_SUMMARY = "expense_summary"
+_ADD_RECURRING_EXPENSE = "add_recurring_expense"
+_LIST_RECURRING_EXPENSES = "list_recurring_expenses"
+_REMOVE_RECURRING_EXPENSE = "remove_recurring_expense"
+
 REMINDER_TOOLS = {
     _SET_REMINDER,
     _LIST_REMINDERS,
@@ -67,6 +76,16 @@ SCHEDULED_ACTION_TOOLS = {_SCHEDULE_ACTION, _LIST_SCHEDULED_ACTIONS, _CANCEL_SCH
 AGENDA_TOOLS = {_ADD_AGENDA_ITEM, _LIST_AGENDA, _REMOVE_AGENDA_ITEM, _SET_DAILY_BRIEFING, _SET_EVENING_BRIEFING}
 ANCHOR_TOOLS = {_ADD_ANCHOR, _LIST_ANCHORS, _REMOVE_ANCHOR, _SUPPRESS_ANCHOR}
 CONVERSATION_TOOLS = {_SEARCH_CONVERSATIONS}
+EXPENSE_TOOLS = {
+    _ADD_EXPENSE, _DELETE_LAST_EXPENSE, _FIX_LAST_EXPENSE, _LIST_RECENT_EXPENSES, _EXPENSE_SUMMARY,
+    _ADD_RECURRING_EXPENSE, _LIST_RECURRING_EXPENSES, _REMOVE_RECURRING_EXPENSE,
+}
+# Tools whose successful use should broadcast the reply to all household senders,
+# not just the one who sent the request. Everything else stays private to the sender.
+BROADCAST_TOOLS = {
+    _ADD_EXPENSE, _DELETE_LAST_EXPENSE, _FIX_LAST_EXPENSE, _EXPENSE_SUMMARY,
+    _ADD_RECURRING_EXPENSE, _REMOVE_RECURRING_EXPENSE,
+}
 
 SYSTEM_PROMPT = (
     "You are ZOE, a personal assistant reachable over WhatsApp that also controls "
@@ -193,6 +212,30 @@ SYSTEM_PROMPT = (
     "'my wife is Dana', 'I like the blinds at 50%'), call remember to save it. Do NOT remember "
     "one-off or transient things (a single shopping item, a specific reminder) — those have their "
     "own tools. When a saved fact becomes wrong or the user asks you to forget it, call forget. "
+    "ZOE tracks household expenses (parity with the family's expense bot). All expenses share one "
+    "household pot; each row is attributed to the sender who reported it. When the user reports "
+    "spending money — e.g. '150 סופר', 'שילמתי 50 שקל בדלק בביט', 'קניתי חולצה ב-200 ב-MAX', or a "
+    "photo of a receipt — call add_expense with amount (in ₪), category (from the fixed list: סופר / "
+    "מסעדות / דלק / חינוך / בריאות / ביגוד / בית / בילויים / תחבורה / חשבונות / ביטוחים / אחר — pick "
+    "the closest match, use 'אחר' only when truly none fit), payment_method (from: MAX / לאומי / "
+    "PayBox / בינלאומי / מזומן / ביט / לא צוין — use 'לא צוין' if the user didn't say), and a short "
+    "description (what was bought). Also pass `date` in ISO YYYY-MM-DD only when the user is reporting "
+    "an expense from a specific past day; otherwise omit and it defaults to today. "
+    "When a photo of a receipt arrives, extract the total amount from the receipt and call add_expense. "
+    "If there are visibly separate purchases on the same receipt, use the grand total unless the user "
+    "asks to split. Non-receipt photos: describe/answer normally without calling add_expense. "
+    "Other expense commands: delete_last_expense removes the sender's most recent manual expense; "
+    "fix_last_expense updates its amount; list_recent_expenses shows the family's recent spending "
+    "(default 10, all household — pass sender_only=true to filter to the current sender). "
+    "expense_summary aggregates over a period ('today', 'this_week', 'this_month', 'last_month', "
+    "'this_year', or explicit start/end YYYY-MM-DD) and returns totals by sender / category / payment "
+    "method. Use it for questions like 'כמה הוצאנו החודש', 'כמה על אוכל השבוע', 'סיכום'. When you "
+    "present a summary in Hebrew, translate sender phone numbers to names using the Known facts. "
+    "For recurring bills (rent, subscriptions, utilities): add_recurring_expense with name, amount, "
+    "day_of_month (1-31), month_pattern (default 'monthly'; for yearly or specific months use "
+    "comma-separated English month abbrevs like 'jan' or 'jan,jul'), category, and payment_method. "
+    "list_recurring_expenses / remove_recurring_expense manage them. ZOE inserts the actual expense "
+    "row automatically on each due day — the user does not need to log it manually. "
     "ZOE keeps a searchable log of every past conversation with each user for up to 90 days. The last "
     "24 hours of exchanges are ALREADY visible to you in this thread (the messages prepended to the "
     "conversation); anything older lives only in the log. When the user references something you "
@@ -647,6 +690,137 @@ def _build_tools(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "type": "object",
                 "properties": {
                     "text": {"type": "string", "description": "Device-name snippet or monitor id."},
+                },
+                "required": ["text"],
+            },
+        },
+        {
+            "name": _ADD_EXPENSE,
+            "description": "Records a household expense (ILS). Household-wide; attributed to the sender.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "amount": {"type": "number", "description": "Amount in ₪ (positive number)."},
+                    "category": {
+                        "type": "string",
+                        "enum": [
+                            "סופר", "מסעדות", "דלק", "חינוך", "בריאות", "ביגוד",
+                            "בית", "בילויים", "תחבורה", "חשבונות", "ביטוחים", "אחר",
+                        ],
+                    },
+                    "payment_method": {
+                        "type": "string",
+                        "enum": ["MAX", "לאומי", "PayBox", "בינלאומי", "מזומן", "ביט", "לא צוין"],
+                    },
+                    "description": {"type": "string", "description": "Short description of what was bought."},
+                    "date": {
+                        "type": "string",
+                        "description": "Optional ISO YYYY-MM-DD. Omit for today. Use only when the user is "
+                        "reporting an expense from a specific past day.",
+                    },
+                },
+                "required": ["amount", "category", "payment_method", "description"],
+            },
+        },
+        {
+            "name": _DELETE_LAST_EXPENSE,
+            "description": "Deletes the sender's most recent manual (or receipt) expense — used when they "
+            "say 'תמחק', 'ביטול', 'תמחק את האחרון' after just logging something.",
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": _FIX_LAST_EXPENSE,
+            "description": "Updates the amount on the sender's most recent manual expense. Use when the "
+            "user says 'תתקן ל-250', 'שנה ל-300' after just logging something.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "new_amount": {"type": "number", "description": "Corrected amount in ₪."},
+                },
+                "required": ["new_amount"],
+            },
+        },
+        {
+            "name": _LIST_RECENT_EXPENSES,
+            "description": "Shows recent expenses. Household-wide by default; pass sender_only=true to "
+            "filter to just this sender's expenses.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "How many to show (default 10, max 50)."},
+                    "sender_only": {"type": "boolean", "description": "True to filter to this sender only."},
+                },
+            },
+        },
+        {
+            "name": _EXPENSE_SUMMARY,
+            "description": "Aggregates household expenses over a period. Returns totals by sender, by "
+            "category, by payment method, and the grand total. Use for 'כמה הוצאנו', 'סיכום החודש', "
+            "'כמה על אוכל השבוע' etc.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "period": {
+                        "type": "string",
+                        "enum": ["today", "this_week", "this_month", "last_month", "this_year"],
+                        "description": "Preset period. Omit and pass start+end for a custom range.",
+                    },
+                    "start": {"type": "string", "description": "Custom-range start (ISO YYYY-MM-DD, inclusive)."},
+                    "end": {"type": "string", "description": "Custom-range end (ISO YYYY-MM-DD, inclusive)."},
+                    "category": {
+                        "type": "string",
+                        "description": "Optional: filter to one category from the fixed list.",
+                    },
+                    "sender_only": {
+                        "type": "boolean",
+                        "description": "True to include only the current sender's expenses in the totals.",
+                    },
+                },
+            },
+        },
+        {
+            "name": _ADD_RECURRING_EXPENSE,
+            "description": "Adds a recurring monthly (or yearly / specific-months) household bill. ZOE "
+            "auto-inserts the actual expense row each due day.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Bill name, e.g. 'ארנונה', 'נטפליקס'."},
+                    "amount": {"type": "number"},
+                    "day_of_month": {"type": "integer", "description": "1-31. Clamped to month-end for short months."},
+                    "month_pattern": {
+                        "type": "string",
+                        "description": "Default 'monthly'. For yearly / specific months, comma-separated "
+                        "English abbrevs like 'jan' (yearly on Jan) or 'jan,jul' (bi-annual).",
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": [
+                            "סופר", "מסעדות", "דלק", "חינוך", "בריאות", "ביגוד",
+                            "בית", "בילויים", "תחבורה", "חשבונות", "ביטוחים", "אחר",
+                        ],
+                        "description": "Default 'חשבונות'.",
+                    },
+                    "payment_method": {
+                        "type": "string",
+                        "enum": ["MAX", "לאומי", "PayBox", "בינלאומי", "מזומן", "ביט", "לא צוין"],
+                    },
+                },
+                "required": ["name", "amount", "day_of_month"],
+            },
+        },
+        {
+            "name": _LIST_RECURRING_EXPENSES,
+            "description": "Lists all recurring household bills with their day and pattern.",
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": _REMOVE_RECURRING_EXPENSE,
+            "description": "Removes a recurring bill by id or by a snippet of its name.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Recurring bill id or a name snippet."},
                 },
                 "required": ["text"],
             },
