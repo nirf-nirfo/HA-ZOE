@@ -170,9 +170,10 @@ async def _compile_evening_briefing(sender: str, today: datetime, tomorrow: date
     lines = ["🌙 ערב טוב!"]
     if today_summary:
         lines.append(f"היום היה: {today_summary}")
-    spent = expenses.total_for_sender_on_date(sender, today_str)
-    if spent > 0:
-        lines.append(f"💰 הוצאת היום: {_fmt_ils(spent)}")
+    # Household-wide spend for today (all senders, all sources — including auto-inserted recurring).
+    spent = expenses.summary(period="today")
+    if spent["count"] > 0:
+        lines.append(f"💰 הוצאות היום: {spent['count']} · סה״כ {_fmt_ils(spent['total'])}")
     if tomorrow_summary:
         lines.append(f"מחר ({_hebrew_day(tomorrow)}): {tomorrow_summary}")
     else:
