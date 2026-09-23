@@ -18,6 +18,7 @@ from app.claude_agent import (
     LIST_TOOLS,
     MEMORY_TOOLS,
     MONITOR_TOOLS,
+    PERSONAL_TASK_TOOLS,
     REMINDER_TOOLS,
     SCHEDULED_ACTION_TOOLS,
     get_known_entities,
@@ -32,7 +33,7 @@ from app.lists import add_item, clear_list, get_all_list_names, get_list, remove
 from app.memory import forget, remember
 from app import (
     agenda, anchors, briefing, check_ins, conversation, conversation_log, expenses,
-    holidays, monitors, recurring_expenses, scheduled_actions,
+    holidays, monitors, personal_tasks, recurring_expenses, scheduled_actions,
 )
 from app import reminders as reminders_mod
 from app.reminders import (
@@ -120,6 +121,18 @@ async def _compile_morning_briefing(sender: str, dt: datetime) -> str:
 
     if agenda_items:
         parts.append("📌 היום:\n" + "\n".join(f"• {i.text}" for i in agenda_items))
+
+    household_open = get_list("tasks")
+    if household_open:
+        lines = [f"• {item.text}" for item in household_open[:8]]
+        more = f"\n… ועוד {len(household_open) - 8}" if len(household_open) > 8 else ""
+        parts.append("📝 משימות בית פתוחות:\n" + "\n".join(lines) + more)
+
+    my_tasks = personal_tasks.list_for(sender)
+    if my_tasks:
+        lines = [f"• {t.text}" for t in my_tasks[:8]]
+        more = f"\n… ועוד {len(my_tasks) - 8}" if len(my_tasks) > 8 else ""
+        parts.append("📌 משימות שלי:\n" + "\n".join(lines) + more)
 
     # On the 1st of the month, tack on last month's expense summary.
     if dt.day == 1:
@@ -1063,6 +1076,42 @@ def _handle_expense_call(sender: str, tool: str, inp: dict) -> str:
     return ""
 
 
+def _handle_personal_task_call(sender: str, tool: str, inp: dict) -> str:
+    if tool == "add_personal_task":
+        text = (inp.get("text") or "").strip()
+        if not text:
+            return "What personal task should I add?"
+        t = personal_tasks.add(sender, text)
+        return f"Added to your personal tasks ✅ [{t.id}] {text}"
+
+    if tool == "list_personal_tasks":
+        tasks = personal_tasks.list_for(sender)
+        if not tasks:
+            return "אין לך משימות אישיות פתוחות."
+        lines = [f"• [{t.id}] {t.text}" for t in tasks]
+        return "המשימות האישיות שלך:\n" + "\n".join(lines)
+
+    if tool == "complete_personal_task":
+        query = (inp.get("text") or "").strip()
+        if not query:
+            return "Which personal task should I mark done?"
+        matches = personal_tasks.find_matching(sender, query)
+        if not matches:
+            return f"I couldn't find a personal task matching '{query}'."
+        if len(matches) > 1:
+            lines = [f"• [{t.id}] {t.text}" for t in matches]
+            return f"Several personal tasks match '{query}' — which one? Reply with its id:\n" + "\n".join(lines)
+        t = matches[0]
+        personal_tasks.complete(sender, t.id)
+        return f"סימנתי שסיימת ✅ — {t.text}"
+
+    if tool == "clear_personal_tasks":
+        count = personal_tasks.clear(sender)
+        return f"נמחקו {count} משימות אישיות ✅" if count else "אין משימות אישיות למחיקה."
+
+    return ""
+
+
 def _handle_check_in_call(sender: str, tool: str, inp: dict) -> str:
     if tool == "schedule_check_in":
         prompt = (inp.get("prompt") or "").strip()
@@ -1171,6 +1220,9 @@ async def _dispatch_tool(
 
     if tool in CHECK_IN_TOOLS:
         return _handle_check_in_call(sender, tool, inp)
+
+    if tool in PERSONAL_TASK_TOOLS:
+        return _handle_personal_task_call(sender, tool, inp)
 
     entity_id = inp.get("entity_id")
     entity_def = known_entities.get(entity_id)

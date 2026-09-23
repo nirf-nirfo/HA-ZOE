@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     expenses_path: str = "/data/expenses.json"
     recurring_expenses_path: str = "/data/recurring_expenses.json"
     check_ins_path: str = "/data/check_ins.json"
+    personal_tasks_path: str = "/data/personal_tasks.json"
     whisper_host: str = "192.168.10.150"
     whisper_port: int = 10300
 

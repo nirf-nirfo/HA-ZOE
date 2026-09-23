@@ -52,6 +52,11 @@ _SUPPRESS_ANCHOR = "suppress_anchor_for_date"
 
 _SEARCH_CONVERSATIONS = "search_past_conversations"
 
+_ADD_PERSONAL_TASK = "add_personal_task"
+_LIST_PERSONAL_TASKS = "list_personal_tasks"
+_COMPLETE_PERSONAL_TASK = "complete_personal_task"
+_CLEAR_PERSONAL_TASKS = "clear_personal_tasks"
+
 _SCHEDULE_CHECK_IN = "schedule_check_in"
 _LIST_CHECK_INS = "list_check_ins"
 _CANCEL_CHECK_IN = "cancel_check_in"
@@ -81,6 +86,7 @@ AGENDA_TOOLS = {_ADD_AGENDA_ITEM, _LIST_AGENDA, _REMOVE_AGENDA_ITEM, _SET_DAILY_
 ANCHOR_TOOLS = {_ADD_ANCHOR, _LIST_ANCHORS, _REMOVE_ANCHOR, _SUPPRESS_ANCHOR}
 CONVERSATION_TOOLS = {_SEARCH_CONVERSATIONS}
 CHECK_IN_TOOLS = {_SCHEDULE_CHECK_IN, _LIST_CHECK_INS, _CANCEL_CHECK_IN}
+PERSONAL_TASK_TOOLS = {_ADD_PERSONAL_TASK, _LIST_PERSONAL_TASKS, _COMPLETE_PERSONAL_TASK, _CLEAR_PERSONAL_TASKS}
 
 # Tools ZOE may call from inside a scheduled check-in — read-only + write to
 # conversation log only. Prevents a check-in from silently controlling devices,
@@ -89,6 +95,7 @@ CHECK_IN_ALLOWED_TOOLS = {
     _STATUS_TOOL, _LIST_REMINDERS, _LIST_AGENDA, _LIST_ANCHORS, _LIST_MONITORS,
     _LIST_SCHEDULED_ACTIONS, _LIST_RECURRING_EXPENSES, _LIST_RECENT_EXPENSES,
     _EXPENSE_SUMMARY, _SHOW_LIST, _SHOW_ALL_LISTS, _SEARCH_CONVERSATIONS,
+    _LIST_PERSONAL_TASKS,
 }
 EXPENSE_TOOLS = {
     _ADD_EXPENSE, _DELETE_LAST_EXPENSE, _FIX_LAST_EXPENSE, _LIST_RECENT_EXPENSES, _EXPENSE_SUMMARY,
@@ -171,6 +178,14 @@ SYSTEM_PROMPT = (
     "If the user refers to a list whose exact name you are unsure of, call show_all_lists first "
     "to see what exists rather than guessing or creating a near-duplicate. "
     "Lists are shared between all family members. "
+    "Distinguish between household tasks and PERSONAL tasks. Household tasks belong on the shared "
+    "list_name='tasks' list (e.g. 'change the gas balloon', 'buy smoke alarm batteries', 'fix the "
+    "front door lock') — anything the family shares responsibility for. Personal tasks are things "
+    "only the sender cares about (e.g. 'open a bug on X', 'email the boss', 'review PR from Dan') "
+    "and belong in the private per-sender bucket, reached via add_personal_task / list_personal_tasks "
+    "/ complete_personal_task / clear_personal_tasks. Personal tasks are NEVER visible to other "
+    "senders in the household. Language cues: 'אני צריך' / 'לי' / 'בעבודה' / 'for me' → personal. "
+    "'אנחנו צריכים' / 'בבית' / 'family' → household `tasks` list. If genuinely ambiguous, ask which. "
     "For air conditioners (climate domain): call set_hvac_mode with service_data "
     "{\"hvac_mode\": ...} where the mode is one of cool, heat, dry, fan_only, auto, or off "
     "('קור'/'קירור'=cool, 'חום'/'חימום'=heat, 'יבש'=dry, 'מאוורר'=fan_only). Turning an AC on "
@@ -585,6 +600,42 @@ def _build_tools(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
         {
             "name": _DELETE_ALL_REMINDERS,
             "description": "Deletes ALL pending reminders for the user at once.",
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": _ADD_PERSONAL_TASK,
+            "description": "Adds a task to the SENDER'S OWN private task list — never visible to other "
+            "family members. Use for personal to-dos ('open a bug on X', 'email the boss'). For "
+            "household chores that everyone shares, use add_to_list with list_name='tasks' instead.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "The personal task text."},
+                },
+                "required": ["text"],
+            },
+        },
+        {
+            "name": _LIST_PERSONAL_TASKS,
+            "description": "Shows the sender's own personal tasks (private). Does not include the shared "
+            "household `tasks` list — use show_list(list_name='tasks') for that.",
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": _COMPLETE_PERSONAL_TASK,
+            "description": "Marks a personal task done (removes it from the sender's private list), "
+            "matched by a snippet of its text or its id.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Task text snippet or id."},
+                },
+                "required": ["text"],
+            },
+        },
+        {
+            "name": _CLEAR_PERSONAL_TASKS,
+            "description": "Removes ALL of the sender's personal tasks at once.",
             "input_schema": {"type": "object", "properties": {}},
         },
         {
