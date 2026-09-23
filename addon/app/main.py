@@ -12,6 +12,7 @@ from app.claude_agent import (
     AGENDA_TOOLS,
     ANCHOR_TOOLS,
     BROADCAST_TOOLS,
+    CHECK_IN_TOOLS,
     CONVERSATION_TOOLS,
     EXPENSE_TOOLS,
     LIST_TOOLS,
@@ -21,6 +22,7 @@ from app.claude_agent import (
     SCHEDULED_ACTION_TOOLS,
     get_known_entities,
     initial_context,
+    run_check_in_model,
     run_model,
 )
 from app.confirmation import make_pending, pop_if_confirmed, store_pending
@@ -29,7 +31,7 @@ from app.logging_config import logger
 from app.lists import add_item, clear_list, get_all_list_names, get_list, remove_items
 from app.memory import forget, remember
 from app import (
-    agenda, anchors, briefing, conversation, conversation_log, expenses,
+    agenda, anchors, briefing, check_ins, conversation, conversation_log, expenses,
     holidays, monitors, recurring_expenses, scheduled_actions,
 )
 from app import reminders as reminders_mod
@@ -65,6 +67,7 @@ async def startup() -> None:
     asyncio.create_task(_monitor_loop())
     asyncio.create_task(_scheduled_action_loop())
     asyncio.create_task(_daily_briefing_loop())
+    asyncio.create_task(_check_in_loop())
 
 
 # Python's weekday() returns Monday=0..Sunday=6; anchors use Sunday..Saturday strings.
@@ -276,6 +279,67 @@ async def _monitor_loop() -> None:
             monitors.purge_expired(now)
         except Exception:
             logger.exception("Monitor loop: purge_expired failed")
+
+
+async def _check_in_loop() -> None:
+    while True:
+        await asyncio.sleep(60)
+        try:
+            due = check_ins.pop_due()
+        except Exception:
+            logger.exception("Check-in loop: pop_due failed")
+            continue
+        for c in due:
+            try:
+                logger.info("Firing check-in %s for %s", c.id, c.sender)
+                await _run_check_in(c.sender, c.prompt)
+            except Exception:
+                logger.exception("Check-in loop: failed to run %s", c.id)
+
+
+async def _run_check_in(sender: str, ci_prompt: str) -> None:
+    """Runs a scheduled check-in as a restricted (read-only) agent turn, then
+    delivers the composed message to the sender."""
+    known_entities = get_known_entities()
+    states = await ha_client.get_states(list(known_entities.keys()))
+
+    framing = (
+        "[SCHEDULED CHECK-IN — invoked by ZOE's scheduler, not by the user.]\n"
+        f"You set up this check-in earlier. Follow this instruction to compose ONE natural "
+        f"WhatsApp message to send to the user NOW:\n\n{ci_prompt}\n\n"
+        "Read any state you need via read-only tools, then reply with the final message text; "
+        "it will be sent to the user verbatim."
+    )
+    context = initial_context(framing, states, sender)
+    messages: list = [{"role": "user", "content": context}]
+    final_text = ""
+
+    for _ in range(_MAX_AGENT_ITERS):
+        message = await asyncio.to_thread(run_check_in_model, messages)
+        tool_uses = [b for b in message.content if b.type == "tool_use"]
+        if tool_uses:
+            messages.append({"role": "assistant", "content": message.content})
+            results = []
+            for tu in tool_uses:
+                logger.info("Check-in tool call: %s %s", tu.name, tu.input)
+                result = await _dispatch_tool(sender, tu.name, tu.input, known_entities, [])
+                results.append({"type": "tool_result", "tool_use_id": tu.id, "content": result})
+            messages.append({"role": "user", "content": results})
+            continue
+        if message.stop_reason == "pause_turn":
+            messages.append({"role": "assistant", "content": message.content})
+            continue
+        final_text = "".join(b.text for b in message.content if b.type == "text").strip()
+        break
+
+    if not final_text:
+        logger.warning("Check-in produced no message for %s (prompt=%r)", sender, ci_prompt)
+        return
+    await send_message(sender, final_text)
+    # Record so a user follow-up ("done", "not yet") has short-term context to resolve against.
+    marker = f"[scheduled check-in: {ci_prompt}]"
+    conversation.record(sender, marker, final_text)
+    conversation_log.append(sender, marker, final_text)
 
 
 async def _reminder_loop() -> None:
@@ -998,6 +1062,57 @@ def _handle_expense_call(sender: str, tool: str, inp: dict) -> str:
     return ""
 
 
+def _handle_check_in_call(sender: str, tool: str, inp: dict) -> str:
+    if tool == "schedule_check_in":
+        prompt = (inp.get("prompt") or "").strip()
+        if not prompt:
+            return "I need a prompt telling me what to check and what to ask."
+        try:
+            dt = datetime.fromisoformat(inp["when"])
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=_IL_TZ)
+            when = dt.timestamp()
+        except (ValueError, KeyError):
+            return "I couldn't parse the datetime — please try again."
+        if when <= datetime.now(tz=_IL_TZ).timestamp():
+            when_str = dt.astimezone(_IL_TZ).strftime("%d/%m/%Y %H:%M")
+            return f"That time ({when_str}) is in the past — nothing to schedule."
+        recurrence = inp.get("recurrence")
+        if recurrence not in check_ins.RECURRENCES:
+            recurrence = None
+        c = check_ins.add(sender, prompt, when, recurrence)
+        when_str = datetime.fromtimestamp(c.next_at, tz=_IL_TZ).strftime("%d/%m/%Y %H:%M")
+        repeat = f" (repeats {recurrence})" if recurrence else ""
+        return f"Check-in scheduled ✅{repeat} — {when_str} — I'll fetch what's needed and message you then."
+
+    if tool == "list_check_ins":
+        pending = check_ins.list_for_sender(sender)
+        if not pending:
+            return "You have no pending check-ins."
+        lines = []
+        for c in pending:
+            when = datetime.fromtimestamp(c.next_at, tz=_IL_TZ).strftime("%d/%m/%Y %H:%M")
+            repeat = f" [{c.recurrence}]" if c.recurrence else ""
+            lines.append(f"• [{c.id}] {when}{repeat} — {c.prompt}")
+        return "Check-ins:\n" + "\n".join(lines)
+
+    if tool == "cancel_check_in":
+        query = (inp.get("text") or "").strip()
+        if not query:
+            return "Which check-in should I cancel?"
+        matches = check_ins.find_matching(sender, query)
+        if not matches:
+            return f"I couldn't find a check-in matching '{query}'."
+        if len(matches) > 1:
+            lines = [f"• [{c.id}] {c.prompt}" for c in matches]
+            return f"Several check-ins match '{query}' — which one? Reply with its id:\n" + "\n".join(lines)
+        c = matches[0]
+        check_ins.remove(c.id, sender)
+        return f"Cancelled ✅ — {c.prompt}"
+
+    return ""
+
+
 def _handle_conversation_call(sender: str, tool: str, inp: dict) -> str:
     if tool == "search_past_conversations":
         query = (inp.get("query") or "").strip()
@@ -1052,6 +1167,9 @@ async def _dispatch_tool(
 
     if tool in EXPENSE_TOOLS:
         return _handle_expense_call(sender, tool, inp)
+
+    if tool in CHECK_IN_TOOLS:
+        return _handle_check_in_call(sender, tool, inp)
 
     entity_id = inp.get("entity_id")
     entity_def = known_entities.get(entity_id)

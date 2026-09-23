@@ -52,6 +52,10 @@ _SUPPRESS_ANCHOR = "suppress_anchor_for_date"
 
 _SEARCH_CONVERSATIONS = "search_past_conversations"
 
+_SCHEDULE_CHECK_IN = "schedule_check_in"
+_LIST_CHECK_INS = "list_check_ins"
+_CANCEL_CHECK_IN = "cancel_check_in"
+
 _ADD_EXPENSE = "add_expense"
 _DELETE_LAST_EXPENSE = "delete_last_expense"
 _FIX_LAST_EXPENSE = "fix_last_expense"
@@ -76,6 +80,16 @@ SCHEDULED_ACTION_TOOLS = {_SCHEDULE_ACTION, _LIST_SCHEDULED_ACTIONS, _CANCEL_SCH
 AGENDA_TOOLS = {_ADD_AGENDA_ITEM, _LIST_AGENDA, _REMOVE_AGENDA_ITEM, _SET_DAILY_BRIEFING, _SET_EVENING_BRIEFING}
 ANCHOR_TOOLS = {_ADD_ANCHOR, _LIST_ANCHORS, _REMOVE_ANCHOR, _SUPPRESS_ANCHOR}
 CONVERSATION_TOOLS = {_SEARCH_CONVERSATIONS}
+CHECK_IN_TOOLS = {_SCHEDULE_CHECK_IN, _LIST_CHECK_INS, _CANCEL_CHECK_IN}
+
+# Tools ZOE may call from inside a scheduled check-in — read-only + write to
+# conversation log only. Prevents a check-in from silently controlling devices,
+# logging expenses, or scheduling more check-ins while the user isn't there.
+CHECK_IN_ALLOWED_TOOLS = {
+    _STATUS_TOOL, _LIST_REMINDERS, _LIST_AGENDA, _LIST_ANCHORS, _LIST_MONITORS,
+    _LIST_SCHEDULED_ACTIONS, _LIST_RECURRING_EXPENSES, _LIST_RECENT_EXPENSES,
+    _EXPENSE_SUMMARY, _SHOW_LIST, _SHOW_ALL_LISTS, _SEARCH_CONVERSATIONS,
+}
 EXPENSE_TOOLS = {
     _ADD_EXPENSE, _DELETE_LAST_EXPENSE, _FIX_LAST_EXPENSE, _LIST_RECENT_EXPENSES, _EXPENSE_SUMMARY,
     _ADD_RECURRING_EXPENSE, _LIST_RECURRING_EXPENSES, _REMOVE_RECURRING_EXPENSE,
@@ -115,6 +129,14 @@ SYSTEM_PROMPT = (
     "text and the exact ISO 8601 datetime (e.g. 2026-07-03T09:00:00). Use the current "
     "datetime provided in the context to resolve relative times like 'tomorrow', 'in 2 hours', "
     "'next Sunday'. All times are in Israel time (Asia/Jerusalem). "
+    "CRITICAL: set_reminder.text is delivered VERBATIM to the user as a WhatsApp message at that "
+    "time — write it as the exact short human message the user will read on their phone ('לא לשכוח "
+    "לתת גלולה לכלב', 'להתקשר לאמא'). NEVER write it as a description of what YOU (ZOE) will do at "
+    "that moment ('לקרוא את הרשימה ולשאול את המשתמש...'), and NEVER as an internal plan or checklist. "
+    "If the user actually wants you to READ fresh state (lists, agenda, expenses, device status) at "
+    "that time and send a dynamically composed message — e.g. 'each evening check my tasks list and "
+    "ask about status', 'every Friday remind me about weekend plans using the agenda' — do NOT use "
+    "set_reminder for that; use schedule_check_in instead (see below). "
     "When the user gives a calendar date without a year (e.g. '8th of January'), always pick "
     "the next occurrence of that date in the future — if it has already passed this year, use "
     "next year. send_at must never be in the past. "
@@ -566,6 +588,53 @@ def _build_tools(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "input_schema": {"type": "object", "properties": {}},
         },
         {
+            "name": _SCHEDULE_CHECK_IN,
+            "description": "Schedules a 'check-in': at the given time, ZOE wakes up, reads whatever fresh "
+            "state your `prompt` tells her to read (lists, agenda, expenses, device status), and sends a "
+            "dynamically composed WhatsApp message to the user. Distinct from set_reminder (static text) "
+            "and from schedule_action (device command). Use for 'every evening at 18:00 check my task list "
+            "and ask what's done', 'every Friday at 14 remind me about the weekend using the agenda', etc. "
+            "The `prompt` field is an instruction to yourself for the moment of firing — write it as: "
+            "'Read <list>, then send the user a message that <what to say>'.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Short instruction to yourself for when the check-in fires. State "
+                        "WHAT to read (e.g. 'read the tasks list') and WHAT MESSAGE to send the user (e.g. "
+                        "'ask which items are done'). Written in the second person to future-you.",
+                    },
+                    "when": {
+                        "type": "string",
+                        "description": "ISO 8601 datetime for the first (or only) fire, Israel time. Must be in the future.",
+                    },
+                    "recurrence": {
+                        "type": "string",
+                        "enum": ["daily", "weekly", "monthly", "yearly"],
+                        "description": "Optional. Omit for a one-time check-in.",
+                    },
+                },
+                "required": ["prompt", "when"],
+            },
+        },
+        {
+            "name": _LIST_CHECK_INS,
+            "description": "Lists the user's pending check-ins with their next fire time and prompt.",
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": _CANCEL_CHECK_IN,
+            "description": "Cancels a scheduled check-in, matched by id or a snippet of its prompt.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Check-in id or a snippet of its prompt."},
+                },
+                "required": ["text"],
+            },
+        },
+        {
             "name": _ADD_TO_LIST,
             "description": "Adds an item to a named shared list (e.g. 'shopping', 'tasks').",
             "input_schema": {
@@ -877,6 +946,16 @@ def initial_context(user_text: str, states: dict[str, Any], sender: str | None =
     )
 
 
+CHECK_IN_SYSTEM_SUFFIX = (
+    "\n\nYou are being invoked as a SCHEDULED CHECK-IN. The user did not just message you — you set "
+    "up this check-in earlier to fire now. Read whatever fresh state the check-in prompt asks for "
+    "(via the read-only tools available), then produce ONE clear, natural WhatsApp message to send "
+    "to the user right now. Do NOT prefix it with '⏰' or '[check-in]' — write it as if you decided "
+    "to text them. You cannot control devices, log expenses, schedule anything new, or modify state "
+    "from a check-in — only read and reply."
+)
+
+
 def run_model(messages: list[dict[str, Any]]) -> Any:
     """One turn of the agentic loop: sends the running transcript and returns the raw
     Anthropic message (content blocks + stop_reason). The caller executes any tool_use
@@ -886,6 +965,22 @@ def run_model(messages: list[dict[str, Any]]) -> Any:
         model=MODEL,
         max_tokens=MAX_TOKENS,
         system=SYSTEM_PROMPT,
+        tools=tools,
+        messages=messages,
+    )
+
+
+def run_check_in_model(messages: list[dict[str, Any]]) -> Any:
+    """One turn of a check-in agent loop, restricted to read-only tools."""
+    all_tools = _build_tools(_load_entities())
+    tools = [
+        t for t in all_tools
+        if t.get("name") in CHECK_IN_ALLOWED_TOOLS or t.get("type") == "web_search_20250305"
+    ]
+    return _client.messages.create(
+        model=MODEL,
+        max_tokens=MAX_TOKENS,
+        system=SYSTEM_PROMPT + CHECK_IN_SYSTEM_SUFFIX,
         tools=tools,
         messages=messages,
     )
