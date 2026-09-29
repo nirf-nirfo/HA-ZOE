@@ -1,10 +1,8 @@
-import json
 import time
 import uuid
-from dataclasses import asdict, dataclass, fields
-from pathlib import Path
+from dataclasses import asdict, dataclass
 
-from app.logging_config import logger
+from app._store import Store
 from app.settings import settings
 
 
@@ -16,32 +14,24 @@ class ListItem:
     added_at: float
 
 
-_FIELDS = {f.name for f in fields(ListItem)}
-
-
-def _from_dict(d: dict) -> ListItem:
-    # Drop unknown keys so a row from a future version can't kill the load.
-    return ListItem(**{k: v for k, v in d.items() if k in _FIELDS})
+_store: Store[ListItem] = Store(lambda: settings.lists_path, ListItem)
 
 
 def _load() -> dict[str, list[ListItem]]:
-    path = Path(settings.lists_path)
-    if not path.exists():
-        return {}
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        return {name: [_from_dict(i) for i in items] for name, items in raw.items()}
-    except Exception:
-        logger.warning("Could not load lists file, starting fresh")
-        return {}
+    # Sub-item filtering happens here: Store.load_dict returns the raw dict,
+    # then each row goes through the Store's per-instance _from_dict for
+    # unknown-key tolerance.
+    raw = _store.load_dict()
+    return {
+        name: [_store._from_dict(i) for i in items if isinstance(i, dict)]
+        for name, items in raw.items()
+        if isinstance(items, list)
+    }
 
 
 def _save(data: dict[str, list[ListItem]]) -> None:
-    path = Path(settings.lists_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({name: [asdict(i) for i in items] for name, items in data.items()}, ensure_ascii=False),
-        encoding="utf-8",
+    _store.save_dict(
+        {name: [asdict(i) for i in items] for name, items in data.items()}
     )
 
 
