@@ -943,9 +943,9 @@ def _handle_expense_call(sender: str, tool: str, inp: dict) -> str:
             return f"Payment method must be one of: {', '.join(expenses.PAYMENT_METHODS)}."
         description = (inp.get("description") or "").strip()
         date = _valid_date(inp.get("date"))
-        source = "receipt" if (inp.get("date") is None and "raw_message" not in inp) else "manual"
-        # We can't easily know receipt-vs-manual from tool inputs alone; keep it simple:
-        source = "manual"
+        # Honor an explicit source from the model; otherwise default to "manual".
+        # (Receipt-vs-manual isn't reliably inferable from tool inputs alone.)
+        source = inp.get("source") or "manual"
         e = expenses.add(sender, amount, category, payment_method, description, source=source, date=date)
         payment_note = f" ({payment_method})" if payment_method != "לא צוין" else ""
         desc_note = f" — {description}" if description else ""

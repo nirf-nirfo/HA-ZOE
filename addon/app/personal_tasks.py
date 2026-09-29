@@ -1,7 +1,7 @@
 import json
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 from app.logging_config import logger
@@ -18,6 +18,14 @@ class PersonalTask:
     id: str
     text: str
     created_at: float
+
+
+_FIELDS = {f.name for f in fields(PersonalTask)}
+
+
+def _from_dict(d: dict) -> PersonalTask:
+    # Drop unknown keys so a row from a future version can't kill the load.
+    return PersonalTask(**{k: v for k, v in d.items() if k in _FIELDS})
 
 
 def _load() -> dict[str, list[dict]]:
@@ -42,7 +50,7 @@ def _to_tasks(raw: list[dict]) -> list[PersonalTask]:
     out = []
     for r in raw:
         try:
-            out.append(PersonalTask(**r))
+            out.append(_from_dict(r))
         except Exception:
             continue
     return out
@@ -81,7 +89,7 @@ def complete(sender: str, task_id: str) -> PersonalTask | None:
             data[sender] = bucket
             _save(data)
             try:
-                return PersonalTask(**removed)
+                return _from_dict(removed)
             except Exception:
                 return None
     return None

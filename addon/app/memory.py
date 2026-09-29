@@ -1,7 +1,7 @@
 import json
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 from app.logging_config import logger
@@ -19,13 +19,21 @@ class Fact:
     added_at: float
 
 
+_FIELDS = {f.name for f in fields(Fact)}
+
+
+def _from_dict(d: dict) -> Fact:
+    # Drop unknown keys so a row from a future version can't kill the load.
+    return Fact(**{k: v for k, v in d.items() if k in _FIELDS})
+
+
 def _load() -> list[Fact]:
     path = Path(settings.memory_path)
     if not path.exists():
         return []
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return [Fact(**f) for f in data]
+        return [_from_dict(f) for f in data]
     except Exception:
         logger.warning("Could not load memory file, starting fresh")
         return []

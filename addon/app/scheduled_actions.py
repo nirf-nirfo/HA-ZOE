@@ -1,7 +1,7 @@
 import json
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 from app.logging_config import logger
@@ -27,13 +27,21 @@ class ScheduledAction:
     duration_minutes: float | None = None
 
 
+_FIELDS = {f.name for f in fields(ScheduledAction)}
+
+
+def _from_dict(d: dict) -> ScheduledAction:
+    # Drop unknown keys so a row from a future version can't kill the load.
+    return ScheduledAction(**{k: v for k, v in d.items() if k in _FIELDS})
+
+
 def _load() -> list[ScheduledAction]:
     path = Path(settings.scheduled_actions_path)
     if not path.exists():
         return []
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return [ScheduledAction(**a) for a in data]
+        return [_from_dict(a) for a in data]
     except Exception:
         logger.warning("Could not load scheduled actions file, starting fresh")
         return []
