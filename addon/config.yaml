@@ -19,6 +19,8 @@ options:
   whatsapp_app_secret: ""
   allowed_sender_numbers: ""
   confirmation_ttl_seconds: 120
+  whisper_host: "192.168.10.150"
+  whisper_port: 10300
 schema:
   anthropic_api_key: str
   ha_long_lived_token: str
@@ -28,4 +30,6 @@ schema:
   whatsapp_app_secret: str
   allowed_sender_numbers: str
   confirmation_ttl_seconds: int
+  whisper_host: str
+  whisper_port: int
 homeassistant_api: true
