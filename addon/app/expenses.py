@@ -1,12 +1,10 @@
-import json
 import time
 import uuid
-from dataclasses import asdict, dataclass, fields, replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from app.logging_config import logger
+from app._store import Store
 from app.settings import settings
 
 _IL_TZ = ZoneInfo("Asia/Jerusalem")
@@ -39,33 +37,15 @@ class Expense:
     created_at: float
 
 
-_FIELDS = {f.name for f in fields(Expense)}
-
-
-def _from_dict(d: dict) -> Expense:
-    # Drop unknown keys so a row from a future version can't kill the load.
-    return Expense(**{k: v for k, v in d.items() if k in _FIELDS})
+_store: Store[Expense] = Store(lambda: settings.expenses_path, Expense)
 
 
 def _load() -> list[Expense]:
-    path = Path(settings.expenses_path)
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return [_from_dict(e) for e in data]
-    except Exception:
-        logger.warning("Could not load expenses file, starting fresh")
-        return []
+    return _store.load_list()
 
 
 def _save(expenses: list[Expense]) -> None:
-    path = Path(settings.expenses_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps([asdict(e) for e in expenses], ensure_ascii=False),
-        encoding="utf-8",
-    )
+    _store.save_list(expenses)
 
 
 def add(
