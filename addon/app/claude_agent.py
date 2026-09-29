@@ -17,12 +17,13 @@ logger = logging.getLogger(__name__)
 _client = Anthropic(api_key=settings.anthropic_api_key)
 
 
-def _log_usage(label: str, usage: Any) -> None:
-    """Log input / cache_read / cache_write / output token counts for a turn.
+def _log_usage(label: str, model: str, usage: Any) -> None:
+    """Log model + input / cache_read / cache_write / output token counts for a turn.
 
     Emitted only when the SDK actually returns cache-related counts, so pre-
-    caching baseline turns stay quiet. Lets us eyeball cache hit rate in the
-    add-on logs without a dedicated metrics endpoint.
+    caching baseline turns stay quiet. Lets us eyeball cache hit rate — and,
+    with Item 04's hybrid routing, which model actually answered — in the add-on
+    logs without a dedicated metrics endpoint.
     """
     if usage is None:
         return
@@ -31,8 +32,9 @@ def _log_usage(label: str, usage: Any) -> None:
     if not (cache_read or cache_write):
         return
     logger.info(
-        "%s tokens: input=%d cache_read=%d cache_write=%d output=%d",
+        "%s tokens: model=%s input=%d cache_read=%d cache_write=%d output=%d",
         label,
+        model,
         getattr(usage, "input_tokens", 0) or 0,
         cache_read,
         cache_write,
@@ -1127,7 +1129,7 @@ def run_model(messages: list[dict[str, Any]]) -> Any:
         tools=_CACHED_TOOLS,
         messages=messages,
     )
-    _log_usage("run_model", getattr(resp, "usage", None))
+    _log_usage("run_model", model, getattr(resp, "usage", None))
     return resp
 
 
@@ -1160,5 +1162,5 @@ def run_check_in_model(messages: list[dict[str, Any]]) -> Any:
         tools=_CHECK_IN_CACHED_TOOLS,
         messages=messages,
     )
-    _log_usage("run_check_in_model", getattr(resp, "usage", None))
+    _log_usage("run_check_in_model", CHECK_IN_MODEL, getattr(resp, "usage", None))
     return resp
