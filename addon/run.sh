@@ -14,6 +14,7 @@ export ALLOWED_SENDER_NUMBERS="$(jq -r '.allowed_sender_numbers' "$CONFIG_PATH")
 export CONFIRMATION_TTL_SECONDS="$(jq -r '.confirmation_ttl_seconds' "$CONFIG_PATH")"
 export WHISPER_HOST="$(jq -r '.whisper_host' "$CONFIG_PATH")"
 export WHISPER_PORT="$(jq -r '.whisper_port' "$CONFIG_PATH")"
+export MODEL_ROUTING_HYBRID="$(jq -r '.model_routing_hybrid' "$CONFIG_PATH")"
 export ENTITIES_CONFIG_PATH="/app/config/entities.yaml"
 
 cd /app
