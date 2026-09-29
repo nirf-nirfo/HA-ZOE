@@ -1058,16 +1058,35 @@ def _system_blocks(closing_extra: str = "") -> list[dict[str, Any]]:
     ]
 
 
+def _build_cached_tools() -> list[dict[str, Any]]:
+    """Build the tools list and mark the last entry with cache_control.
+
+    Anthropic caches ALL preceding tool definitions as one block whenever the
+    last entry carries a cache_control marker. Combined with the cache markers
+    on `system`, the whole ~15k-token static prefix (system + tools) becomes a
+    single cached prefix on the 2nd and later turns.
+    """
+    tools = _build_tools(_load_entities())
+    if tools:
+        tools[-1] = {**tools[-1], "cache_control": {"type": "ephemeral"}}
+    return tools
+
+
+# Computed once at import time. The tool schemas depend only on
+# config/entities.yaml — which is effectively stable for the add-on's
+# lifetime, since editing it already requires an add-on restart.
+_CACHED_TOOLS = _build_cached_tools()
+
+
 def run_model(messages: list[dict[str, Any]]) -> Any:
     """One turn of the agentic loop: sends the running transcript and returns the raw
     Anthropic message (content blocks + stop_reason). The caller executes any tool_use
     blocks, appends the results, and calls again until stop_reason is not tool_use."""
-    tools = _build_tools(_load_entities())
     return _client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
         system=_system_blocks(),
-        tools=tools,
+        tools=_CACHED_TOOLS,
         messages=messages,
     )
 
