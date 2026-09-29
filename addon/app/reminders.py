@@ -48,6 +48,8 @@ def _add_period(dt: datetime, recurrence: str) -> datetime:
 def _next_occurrence(send_at: float, recurrence: str, now: float) -> float:
     """Returns the first occurrence strictly after `now`, so a reminder missed
     while the add-on was down catches up to the future instead of firing repeatedly."""
+    if recurrence not in RECURRENCES:
+        raise ValueError(f"invalid recurrence: {recurrence!r}")
     dt = datetime.fromtimestamp(send_at, _IL_TZ).replace(tzinfo=None)
     while True:
         dt = _add_period(dt, recurrence)
