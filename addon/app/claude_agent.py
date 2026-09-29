@@ -108,10 +108,17 @@ BROADCAST_TOOLS = {
     _ADD_RECURRING_EXPENSE, _REMOVE_RECURRING_EXPENSE,
 }
 
-SYSTEM_PROMPT = (
+# The system prompt is split into named sections so the stable parts can be
+# marked with Anthropic's cache_control (see run_model / run_check_in_model).
+# Content is intentionally identical to the pre-split single-string version —
+# any reword/reorder is Item 17's job, not this refactor.
+PERSONA = (
     "You are ZOE, a personal assistant reachable over WhatsApp that also controls "
     "Home Assistant. You are given a list of known smart-home devices (entities) with "
     "their current state. "
+)
+
+TOOL_POLICY = (
     "When the user asks you to do something to one of those devices, call the "
     "control_device tool with the exact entity_id, domain, and service from the device "
     "list. "
@@ -287,6 +294,15 @@ SYSTEM_PROMPT = (
     "'remind me about the article last week', 'the plan we made for Y' — call "
     "search_past_conversations with a distinctive keyword. Only call it when the referenced context "
     "isn't in what you can already see; don't search for things obviously in this thread. "
+)
+
+# Reserved for Item 17's prompt restructure — currently the domain rules
+# (Israel timezone, Hebrew gendered forms, expense categories) are intertwined
+# with the tool-specific text in TOOL_POLICY above. Leaving this empty keeps
+# the assembled SYSTEM_PROMPT byte-for-byte identical to the pre-split version.
+DOMAIN_RULES = ""
+
+CLOSING = (
     "You work in a tool-use loop: after you call a tool you will be shown its result, and you "
     "may call more tools before answering. Chain steps when a task needs it — e.g. call "
     "get_device_status, read the result, then decide whether to act; or call list_reminders to "
@@ -295,6 +311,8 @@ SYSTEM_PROMPT = (
     "output, entity_ids, or internal ✅ strings verbatim; phrase it for a person. "
     "Reply in whatever language the user wrote in."
 )
+
+SYSTEM_PROMPT = PERSONA + TOOL_POLICY + DOMAIN_RULES + CLOSING
 
 MODEL = "claude-opus-5"
 MAX_TOKENS = 2048
