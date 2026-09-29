@@ -108,9 +108,16 @@ def test_normalize_recurring_pulls_yearly_back_when_year_was_wrong(tmp_stores):
 
 def test_normalize_recurring_leaves_correct_yearly_alone(tmp_stores):
     """If the yearly is already at its next natural occurrence, don't move it."""
+    # Use a fixed non-DST-boundary date to avoid a false positive: `now + 30 days`
+    # can straddle Israel's DST fall-back in October, so the wall-time
+    # reconstruction inside next_annual_occurrence drifts by an hour and looks
+    # like a needed correction. Anchor the reminder to next July instead.
     now = time.time()
-    future = now + 30 * 86400  # 30 days out
-    reminders.add_reminder("s1", "later", send_at=future, recurrence="yearly")
+    now_dt = datetime.fromtimestamp(now, _IL_TZ)
+    target = now_dt.replace(month=7, day=15, hour=9, minute=0, second=0, microsecond=0)
+    if target.timestamp() <= now:
+        target = target.replace(year=now_dt.year + 1)
+    reminders.add_reminder("s1", "later", send_at=target.timestamp(), recurrence="yearly")
     changed = reminders.normalize_recurring()
     assert changed == 0
 
