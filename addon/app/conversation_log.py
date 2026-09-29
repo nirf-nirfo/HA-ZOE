@@ -1,8 +1,6 @@
-import json
 import time
-from pathlib import Path
 
-from app.logging_config import logger
+from app._store import Store
 from app.settings import settings
 
 # Persistent append-only log of every exchange, searchable long after the
@@ -15,22 +13,16 @@ _MAX_AGE_SECONDS = 90 * 24 * 60 * 60
 _MAX_RESULTS = 15
 
 
+# List of raw dicts — no dataclass, just corruption-tolerant load and atomic write.
+_store: Store = Store(lambda: settings.conversation_log_path)
+
+
 def _load() -> list[dict]:
-    path = Path(settings.conversation_log_path)
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
-    except Exception:
-        logger.warning("Could not load conversation log file, starting fresh")
-        return []
+    return _store.load_list()
 
 
 def _save(entries: list[dict]) -> None:
-    path = Path(settings.conversation_log_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(entries, ensure_ascii=False), encoding="utf-8")
+    _store.save_list(entries)
 
 
 def append(sender: str, user_text: str, assistant_text: str) -> None:

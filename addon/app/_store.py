@@ -37,9 +37,10 @@ class Store(Generic[T]):
 
     def _from_dict(self, d: dict) -> T:
         if self._cls is None:
-            # No dataclass configured — caller is using load_dict/save_dict for
-            # a raw payload and should not be routing through _from_dict.
-            raise RuntimeError("Store has no dataclass; use load_dict/save_dict")
+            # No dataclass configured — raw dict passthrough. Callers with
+            # cls=None get the dict back untouched from load_list, and this
+            # keeps load_list uniform.
+            return d  # type: ignore[return-value]
         # Drop unknown keys so a row from a future version (or a manual edit)
         # can't kill the whole load with a TypeError.
         return self._cls(**{k: v for k, v in d.items() if k in self._field_names})
@@ -61,10 +62,13 @@ class Store(Generic[T]):
         p = self._path()
         p.parent.mkdir(parents=True, exist_ok=True)
         tmp = p.with_suffix(p.suffix + ".tmp")
-        tmp.write_text(
-            json.dumps([asdict(i) for i in items], ensure_ascii=False),
-            encoding="utf-8",
-        )
+        # cls=None stores hold raw dicts; asdict would fail on those, so pass
+        # them through directly.
+        if self._cls is None:
+            payload = list(items)  # type: ignore[arg-type]
+        else:
+            payload = [asdict(i) for i in items]
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, p)
 
     def load_dict(self) -> dict:

@@ -133,8 +133,17 @@ def test_path_is_read_lazily(tmp_path):
 
 
 def test_load_dict_without_cls_works(tmp_path):
-    # conversation.py / conversation_log.py wrap raw payloads with no dataclass.
+    # conversation.py wraps a raw dict payload with no dataclass.
     path = tmp_path / "raw.json"
     store = Store(lambda: str(path))
     store.save_dict({"a": 1, "b": [1, 2, 3]})
     assert store.load_dict() == {"a": 1, "b": [1, 2, 3]}
+
+
+def test_load_list_without_cls_returns_raw_dicts(tmp_path):
+    # conversation_log.py holds a list of raw dicts — no dataclass needed.
+    path = tmp_path / "raw.json"
+    store = Store(lambda: str(path))
+    rows = [{"sender": "nir", "user": "hi", "ts": 1.0}, {"sender": "nir", "user": "bye", "ts": 2.0}]
+    store.save_list(rows)
+    assert store.load_list() == rows
