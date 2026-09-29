@@ -75,22 +75,25 @@ Zero automated tests today. Every change is a live-fire test at home. Add pytest
 
 ---
 
-### [ ] Item 04 — Model routing (Sonnet for parsing, Opus for reasoning)
+### [ ] Item 04 — Hybrid model routing (Sonnet interactive, Opus check-ins)
 **Budget:** ~$10 · **Risk:** medium (behavior sensitive) · **Branch:** `step-04-model-routing`
 
-Currently every turn uses `claude-opus-5` at ~$0.15/turn. Many turns are simple: "add tomatoes to shopping" is one `add_to_list` call — Sonnet 5 handles it identically at ~1/5 the cost.
+**Decided approach (user-approved):** hybrid.
+- `claude-sonnet-5` for the interactive path — expense parsing, list ops, reminders, device control, agenda, anchors, all the routine tool dispatch.
+- `claude-opus-5` for **check-ins only** — they compose fresh messages, benefit from the better model, and only fire ~30–60 times/month per user.
+- Escalation hook: if Sonnet returns a refusal or errors on a specific pattern, route that pattern to Opus. Item 17's behavior harness surfaces which patterns need this.
 
-Approach — **triage** step (very cheap Sonnet call):
-1. First model call: `claude-sonnet-5` with the full agent loop.
-2. If Sonnet finishes in 1 iteration with no complex reasoning, done — cost ~$0.03.
-3. Escalate to Opus only when Sonnet either:
-   - Returns `stop_reason=refusal` or errors
-   - The user's message is flagged as complex (multi-step planning, ambiguous, memory-heavy) via a simple classifier
-   - The check-in agent (which composes messages, benefits from Opus)
+Approach:
+- Add `INTERACTIVE_MODEL` and `CHECK_IN_MODEL` constants in `claude_agent.py`.
+- `run_model` uses `INTERACTIVE_MODEL`; `run_check_in_model` uses `CHECK_IN_MODEL`. Both routes benefit from Item 02's prompt caching.
+- Behind a feature flag `model_routing_hybrid: bool` (default off in shipped version, on in test) so we can flip only after Item 17's harness confirms Sonnet handles the canonical scenarios ≥ 90%.
 
-Alternative simpler approach: use Sonnet **always** for the interactive path, keep Opus **only** for the check-in agent. Test whether Sonnet is good enough for the household. Cheaper to build and evaluate.
+**Expected cost impact** (rough — real numbers on your Anthropic console):
+- Current (Opus, no cache): ~$0.30/turn interactive
+- After Items 02 + 04: ~$0.03/turn interactive, ~$0.12/check-in
+- Monthly drop of ~80% at typical household usage.
 
-**Acceptance:** monthly cost drops by ~50–70% in interactive turns; regression tests for reminder-creation, expense-parsing, and control-device intent all still pass.
+**Acceptance:** Item 17's behavior harness passes ≥ 90% on the canonical set with Sonnet; check-ins still compose in the same style; feature flag flips default to on after a soak day at home.
 
 ---
 
@@ -170,6 +173,50 @@ Requires Item 03 to exist first.
 - Branch protection on `main`: require the check to pass before merge.
 
 **Acceptance:** opening a PR triggers CI; a failing test blocks merge.
+
+---
+
+### [ ] Item 16 — 24h Meta window countdown warning
+**Budget:** ~$4 · **Risk:** low · **Branch:** `step-16-meta-window`
+
+The user is on Meta's free-tier phone number. Meta only allows outbound free-form messages within 24h of the recipient's last inbound message. Right now the window silently closes and Zoe just fails to deliver. Add a proactive warning.
+
+- Track `last_inbound_at` per allowed sender (extend the existing `_seen_messages.json` or new small store).
+- Small background loop (tick every 5 min): for each allowed sender, if `now - last_inbound_at >= 23h AND < 24h AND not warned_this_cycle`, send: "⏰ עוד שעה החלון של Meta נסגר. שלח לי משהו קצר ('היי') כדי לפתוח אותו מחדש."
+- Optional second warning at 23h45m.
+- Any inbound message resets `last_inbound_at` and clears `warned_this_cycle`.
+- No warnings if the sender is inactive by design (no recent activity for days — don't ping the wife at 4am if she hasn't messaged in a week).
+
+**Acceptance:** silent for 23h after any inbound; warns once at 23h; resets on next inbound; test with a mocked clock.
+
+---
+
+### [ ] Item 17 — Consistency audit (prompt restructure + behavior harness)
+**Budget:** ~$8 · **Risk:** medium · **Branch:** `step-17-consistency`
+
+Addresses the user's core complaint: "she's inconsistent, sometimes stupid." Two-part:
+
+**Part A — Prompt audit:** the current `SYSTEM_PROMPT` is ~200 lines of layered rules. Cloud agent reads it critically, finds:
+- Contradictions between sections (e.g. old set_reminder guidance vs new schedule_check_in guidance)
+- Overlapping / redundant instructions
+- Ambiguous places where the model has to guess
+- Missing guidance for known failure patterns (yearly reminders, personal-vs-household tasks, broadcast semantics, gendered Hebrew)
+
+Restructures into a cleaner sectioned prompt: `persona → tool policy → domain rules → language rules → safety`. Uses Anthropic's prompt engineering best practices (positive framing, examples for edge cases, clear precedence).
+
+**Part B — Behavior harness:** ~20 canonical scenarios covering the common flows:
+- Add expense (with & without payment method)
+- Cancel reminder by description
+- Ask "how much did we spend on X this month"
+- "No soccer this Sunday" → suppress anchor
+- "Add to shopping" vs "add to my tasks" — household vs personal
+- Voice input transcription round-trip
+- Receipt image → expense
+- Multi-device control ("close all shutters")
+
+Each scenario has an expected tool-call sequence. Run 3× per scenario to catch flakiness. Report shows pass rate per scenario.
+
+**Acceptance:** pass rate ≥ 90% across canonical scenarios on the restructured prompt with Sonnet 5; regression suite lives in `tests/behavior/` and runs on demand (gated by env var since it costs API credits).
 
 ---
 
@@ -277,7 +324,7 @@ Once phases A–C land, run `/code-review ultra` against the refactored codebase
 | 01 Latent bugs | $4 | $4 |
 | 02 Prompt caching | $8 | $12 |
 | 03 Test scaffold | $15 | $27 |
-| 04 Model routing | $10 | $37 |
+| 04 Hybrid model routing | $10 | $37 |
 | 05 Generic store | $15 | $52 |
 | 06 Split main.py | $12 | $64 |
 | 07 Status endpoint | $4 | $68 |
@@ -288,24 +335,28 @@ Once phases A–C land, run `/code-review ultra` against the refactored codebase
 | 12 Check-in continuity | $5 | $90 |
 | 13 Name resolution | $4 | $94 |
 | 14 HA parallel | $3 | $97 |
-| — Reserve | | $3 left of $100 |
-| 15 Ultra review | $10 | *dips into reserve if all above land under budget* |
+| **16 Meta window warning** (new) | **$4** | **$101 — over** |
+| **17 Consistency audit** (new) | **$8** | **$109 — over** |
+| 15 Ultra review (bonus) | $10 | $119 |
 
-Reality: the sum is aggressive because a well-scoped cloud brief often lands well under estimate. If we're on track after Item 06, most of Phase C is already funded.
+Nominal sum ($119) exceeds the $100 pot on paper. In practice, well-scoped cloud briefs typically land at 60–80% of their estimate, so realistic net spend is ~$85–95. If we're tracking against budget after Phase A merges (items 01–06), we tighten or defer bonus items 15 / 17 to stay in envelope.
+
+Real budget reconciliation happens after each merge: I log actual credit spend into the Progress log below.
 
 ---
 
 ## Recommended execution order
 
-1. **01 → 02 → 03** sequentially (each depends slightly on the prior; 03 is what unlocks safe parallelism after).
-2. **04, 07, 09, 14** can run in parallel (independent, small).
+1. **01 → 02 → 03** sequentially (each depends slightly on the prior; 03 unlocks safe parallelism after).
+2. **04, 07, 09, 14, 16** can run in parallel (independent, small).
 3. **05 → 06** sequentially (05's `Store` class simplifies 06's split).
-4. **10 + 11** together (both touch briefing compile).
-5. **12, 13** in parallel (independent).
-6. **08** any time after 03 lands.
-7. **15** last.
+4. **17** after 04 (its harness verifies the hybrid routing) — feeds targeted fixes.
+5. **10 + 11** together (both touch briefing compile).
+6. **12, 13** in parallel (independent).
+7. **08** any time after 03 lands.
+8. **15** last, if budget survives.
 
-Parallel execution: I can launch 3 cloud agents concurrently. Sequential means we wait for a merge before starting the next.
+Parallel execution: up to 3 cloud agents concurrently.
 
 ---
 
@@ -339,3 +390,5 @@ Never bump/deploy mid-phase.
 | 13 | — | — | — |
 | 14 | — | — | — |
 | 15 | — | — | — |
+| 16 | — | — | — |
+| 17 | — | — | — |
