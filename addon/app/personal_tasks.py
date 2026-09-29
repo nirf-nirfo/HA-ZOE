@@ -95,6 +95,11 @@ def complete(sender: str, task_id: str) -> PersonalTask | None:
     return None
 
 
+def count_by_sender() -> dict[str, int]:
+    """{sender_phone: open_task_count}. Summary for /admin/status."""
+    return {sender: len(bucket) for sender, bucket in _load().items()}
+
+
 def clear(sender: str) -> int:
     data = _load()
     bucket = data.get(sender, [])
