@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -11,7 +12,32 @@ from anthropic import Anthropic
 from app.memory import all_facts
 from app.settings import settings
 
+logger = logging.getLogger(__name__)
+
 _client = Anthropic(api_key=settings.anthropic_api_key)
+
+
+def _log_usage(label: str, usage: Any) -> None:
+    """Log input / cache_read / cache_write / output token counts for a turn.
+
+    Emitted only when the SDK actually returns cache-related counts, so pre-
+    caching baseline turns stay quiet. Lets us eyeball cache hit rate in the
+    add-on logs without a dedicated metrics endpoint.
+    """
+    if usage is None:
+        return
+    cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+    cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+    if not (cache_read or cache_write):
+        return
+    logger.info(
+        "%s tokens: input=%d cache_read=%d cache_write=%d output=%d",
+        label,
+        getattr(usage, "input_tokens", 0) or 0,
+        cache_read,
+        cache_write,
+        getattr(usage, "output_tokens", 0) or 0,
+    )
 
 _CONTROL_TOOL = "control_device"
 _STATUS_TOOL = "get_device_status"
@@ -108,10 +134,17 @@ BROADCAST_TOOLS = {
     _ADD_RECURRING_EXPENSE, _REMOVE_RECURRING_EXPENSE,
 }
 
-SYSTEM_PROMPT = (
+# The system prompt is split into named sections so the stable parts can be
+# marked with Anthropic's cache_control (see run_model / run_check_in_model).
+# Content is intentionally identical to the pre-split single-string version —
+# any reword/reorder is Item 17's job, not this refactor.
+PERSONA = (
     "You are ZOE, a personal assistant reachable over WhatsApp that also controls "
     "Home Assistant. You are given a list of known smart-home devices (entities) with "
     "their current state. "
+)
+
+TOOL_POLICY = (
     "When the user asks you to do something to one of those devices, call the "
     "control_device tool with the exact entity_id, domain, and service from the device "
     "list. "
@@ -287,6 +320,15 @@ SYSTEM_PROMPT = (
     "'remind me about the article last week', 'the plan we made for Y' — call "
     "search_past_conversations with a distinctive keyword. Only call it when the referenced context "
     "isn't in what you can already see; don't search for things obviously in this thread. "
+)
+
+# Reserved for Item 17's prompt restructure — currently the domain rules
+# (Israel timezone, Hebrew gendered forms, expense categories) are intertwined
+# with the tool-specific text in TOOL_POLICY above. Leaving this empty keeps
+# the assembled SYSTEM_PROMPT byte-for-byte identical to the pre-split version.
+DOMAIN_RULES = ""
+
+CLOSING = (
     "You work in a tool-use loop: after you call a tool you will be shown its result, and you "
     "may call more tools before answering. Chain steps when a task needs it — e.g. call "
     "get_device_status, read the result, then decide whether to act; or call list_reminders to "
@@ -295,6 +337,8 @@ SYSTEM_PROMPT = (
     "output, entity_ids, or internal ✅ strings verbatim; phrase it for a person. "
     "Reply in whatever language the user wrote in."
 )
+
+SYSTEM_PROMPT = PERSONA + TOOL_POLICY + DOMAIN_RULES + CLOSING
 
 MODEL = "claude-opus-5"
 MAX_TOKENS = 2048
@@ -1021,31 +1065,88 @@ CHECK_IN_SYSTEM_SUFFIX = (
 )
 
 
+def _system_blocks(closing_extra: str = "") -> list[dict[str, Any]]:
+    """Assemble the system prompt as cache-marked content blocks.
+
+    Each block is stable across turns, so Anthropic's prompt cache serves the
+    prefix on the second and subsequent calls within the 5-min TTL. `closing_extra`
+    lets check-ins append their suffix to the CLOSING block without breaking the
+    shared PERSONA / TOOL_POLICY prefix cache with the interactive path.
+    """
+    return [
+        {"type": "text", "text": PERSONA, "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": TOOL_POLICY, "cache_control": {"type": "ephemeral"}},
+        {
+            "type": "text",
+            "text": DOMAIN_RULES + CLOSING + closing_extra,
+            "cache_control": {"type": "ephemeral"},
+        },
+    ]
+
+
+def _build_cached_tools() -> list[dict[str, Any]]:
+    """Build the tools list and mark the last entry with cache_control.
+
+    Anthropic caches ALL preceding tool definitions as one block whenever the
+    last entry carries a cache_control marker. Combined with the cache markers
+    on `system`, the whole ~15k-token static prefix (system + tools) becomes a
+    single cached prefix on the 2nd and later turns.
+    """
+    tools = _build_tools(_load_entities())
+    if tools:
+        tools[-1] = {**tools[-1], "cache_control": {"type": "ephemeral"}}
+    return tools
+
+
+# Computed once at import time. The tool schemas depend only on
+# config/entities.yaml — which is effectively stable for the add-on's
+# lifetime, since editing it already requires an add-on restart.
+_CACHED_TOOLS = _build_cached_tools()
+
+
 def run_model(messages: list[dict[str, Any]]) -> Any:
     """One turn of the agentic loop: sends the running transcript and returns the raw
     Anthropic message (content blocks + stop_reason). The caller executes any tool_use
     blocks, appends the results, and calls again until stop_reason is not tool_use."""
-    tools = _build_tools(_load_entities())
-    return _client.messages.create(
+    resp = _client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
-        system=SYSTEM_PROMPT,
-        tools=tools,
+        system=_system_blocks(),
+        tools=_CACHED_TOOLS,
         messages=messages,
     )
+    _log_usage("run_model", getattr(resp, "usage", None))
+    return resp
+
+
+def _build_cached_check_in_tools() -> list[dict[str, Any]]:
+    """The check-in tool subset, with cache_control on the last entry.
+
+    We filter the already-built full list (which drops the cache_control
+    marker from the old last tool if it isn't in the subset) then re-apply
+    the marker to the new last tool so the subset also caches.
+    """
+    subset = [
+        {k: v for k, v in t.items() if k != "cache_control"}
+        for t in _CACHED_TOOLS
+        if t.get("name") in CHECK_IN_ALLOWED_TOOLS or t.get("type") == "web_search_20250305"
+    ]
+    if subset:
+        subset[-1] = {**subset[-1], "cache_control": {"type": "ephemeral"}}
+    return subset
+
+
+_CHECK_IN_CACHED_TOOLS = _build_cached_check_in_tools()
 
 
 def run_check_in_model(messages: list[dict[str, Any]]) -> Any:
     """One turn of a check-in agent loop, restricted to read-only tools."""
-    all_tools = _build_tools(_load_entities())
-    tools = [
-        t for t in all_tools
-        if t.get("name") in CHECK_IN_ALLOWED_TOOLS or t.get("type") == "web_search_20250305"
-    ]
-    return _client.messages.create(
+    resp = _client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
-        system=SYSTEM_PROMPT + CHECK_IN_SYSTEM_SUFFIX,
-        tools=tools,
+        system=_system_blocks(closing_extra=CHECK_IN_SYSTEM_SUFFIX),
+        tools=_CHECK_IN_CACHED_TOOLS,
         messages=messages,
     )
+    _log_usage("run_check_in_model", getattr(resp, "usage", None))
+    return resp
