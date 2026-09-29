@@ -340,7 +340,14 @@ CLOSING = (
 
 SYSTEM_PROMPT = PERSONA + TOOL_POLICY + DOMAIN_RULES + CLOSING
 
-MODEL = "claude-opus-5"
+# Item 04: hybrid model routing. Interactive turns can run on Sonnet (cheaper,
+# roughly identical behavior on the routine tool-dispatch path) while check-ins
+# — which compose fresh outbound messages ~30-60 times/month — stay on Opus.
+# The interactive choice is gated by settings.model_routing_hybrid (default off
+# in the shipped add-on; user opts in until Item 17 validates the switch).
+INTERACTIVE_MODEL_DEFAULT = "claude-opus-5"
+INTERACTIVE_MODEL_HYBRID = "claude-sonnet-5"
+CHECK_IN_MODEL = "claude-opus-5"
 MAX_TOKENS = 2048
 
 
@@ -1108,8 +1115,13 @@ def run_model(messages: list[dict[str, Any]]) -> Any:
     """One turn of the agentic loop: sends the running transcript and returns the raw
     Anthropic message (content blocks + stop_reason). The caller executes any tool_use
     blocks, appends the results, and calls again until stop_reason is not tool_use."""
+    model = (
+        INTERACTIVE_MODEL_HYBRID
+        if settings.model_routing_hybrid
+        else INTERACTIVE_MODEL_DEFAULT
+    )
     resp = _client.messages.create(
-        model=MODEL,
+        model=model,
         max_tokens=MAX_TOKENS,
         system=_system_blocks(),
         tools=_CACHED_TOOLS,
@@ -1142,7 +1154,7 @@ _CHECK_IN_CACHED_TOOLS = _build_cached_check_in_tools()
 def run_check_in_model(messages: list[dict[str, Any]]) -> Any:
     """One turn of a check-in agent loop, restricted to read-only tools."""
     resp = _client.messages.create(
-        model=MODEL,
+        model=CHECK_IN_MODEL,
         max_tokens=MAX_TOKENS,
         system=_system_blocks(closing_extra=CHECK_IN_SYSTEM_SUFFIX),
         tools=_CHECK_IN_CACHED_TOOLS,
