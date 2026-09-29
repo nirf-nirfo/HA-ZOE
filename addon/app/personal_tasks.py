@@ -1,10 +1,8 @@
-import json
 import time
 import uuid
-from dataclasses import asdict, dataclass, fields
-from pathlib import Path
+from dataclasses import asdict, dataclass
 
-from app.logging_config import logger
+from app._store import Store
 from app.settings import settings
 
 # Per-sender private task list — parallel to the household `tasks` list but
@@ -20,37 +18,25 @@ class PersonalTask:
     created_at: float
 
 
-_FIELDS = {f.name for f in fields(PersonalTask)}
-
-
-def _from_dict(d: dict) -> PersonalTask:
-    # Drop unknown keys so a row from a future version can't kill the load.
-    return PersonalTask(**{k: v for k, v in d.items() if k in _FIELDS})
+_store: Store[PersonalTask] = Store(lambda: settings.personal_tasks_path, PersonalTask)
 
 
 def _load() -> dict[str, list[dict]]:
-    path = Path(settings.personal_tasks_path)
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        logger.warning("Could not load personal_tasks file, starting fresh")
-        return {}
+    return _store.load_dict()
 
 
 def _save(data: dict[str, list[dict]]) -> None:
-    path = Path(settings.personal_tasks_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    _store.save_dict(data)
 
 
 def _to_tasks(raw: list[dict]) -> list[PersonalTask]:
+    # Sub-item filtering has to happen here — Store.load_dict returns the raw
+    # dict without touching its values, so rows written by a future version
+    # get filtered through the Store's per-instance _from_dict here.
     out = []
     for r in raw:
         try:
-            out.append(_from_dict(r))
+            out.append(_store._from_dict(r))
         except Exception:
             continue
     return out
@@ -89,7 +75,7 @@ def complete(sender: str, task_id: str) -> PersonalTask | None:
             data[sender] = bucket
             _save(data)
             try:
-                return _from_dict(removed)
+                return _store._from_dict(removed)
             except Exception:
                 return None
     return None
