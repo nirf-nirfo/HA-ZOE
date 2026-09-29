@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     # silently break voice transcription; defaults kept as a fallback.
     whisper_host: str = "192.168.10.150"
     whisper_port: int = 10300
+    # Item 04: when true, interactive turns use Sonnet 5 (check-ins stay on Opus 5).
+    # Default off; user opts in via the add-on option and Item 17 validates before we
+    # flip the shipped default.
+    model_routing_hybrid: bool = False
 
 
 settings = Settings()

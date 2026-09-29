@@ -21,6 +21,7 @@ options:
   confirmation_ttl_seconds: 120
   whisper_host: "192.168.10.150"
   whisper_port: 10300
+  model_routing_hybrid: false
 schema:
   anthropic_api_key: str
   ha_long_lived_token: str
@@ -32,4 +33,5 @@ schema:
   confirmation_ttl_seconds: int
   whisper_host: str
   whisper_port: int
+  model_routing_hybrid: bool
 homeassistant_api: true
