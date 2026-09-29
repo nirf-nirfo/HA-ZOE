@@ -33,7 +33,7 @@ from app.lists import add_item, clear_list, get_all_list_names, get_list, remove
 from app.memory import forget, remember
 from app import (
     agenda, anchors, briefing, check_ins, conversation, conversation_log, expenses,
-    holidays, monitors, personal_tasks, recurring_expenses, scheduled_actions,
+    holidays, inbound_tracker, monitors, personal_tasks, recurring_expenses, scheduled_actions,
 )
 from app import reminders as reminders_mod
 from app.reminders import (
@@ -412,6 +412,13 @@ def _allowed_senders() -> set[str]:
 
 async def _process_message(parsed) -> None:
     sender = parsed.sender
+    # Sender was already verified as allowed in receive_webhook. Refresh the
+    # Meta 24h-window tracker on every real inbound so _meta_window_loop can
+    # warn the user before the window closes.
+    try:
+        inbound_tracker.record_inbound(sender)
+    except Exception:
+        logger.exception("Failed to record inbound for %s", sender)
     text = parsed.text
     image_block = None
 
