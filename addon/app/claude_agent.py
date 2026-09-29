@@ -1039,6 +1039,25 @@ CHECK_IN_SYSTEM_SUFFIX = (
 )
 
 
+def _system_blocks(closing_extra: str = "") -> list[dict[str, Any]]:
+    """Assemble the system prompt as cache-marked content blocks.
+
+    Each block is stable across turns, so Anthropic's prompt cache serves the
+    prefix on the second and subsequent calls within the 5-min TTL. `closing_extra`
+    lets check-ins append their suffix to the CLOSING block without breaking the
+    shared PERSONA / TOOL_POLICY prefix cache with the interactive path.
+    """
+    return [
+        {"type": "text", "text": PERSONA, "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": TOOL_POLICY, "cache_control": {"type": "ephemeral"}},
+        {
+            "type": "text",
+            "text": DOMAIN_RULES + CLOSING + closing_extra,
+            "cache_control": {"type": "ephemeral"},
+        },
+    ]
+
+
 def run_model(messages: list[dict[str, Any]]) -> Any:
     """One turn of the agentic loop: sends the running transcript and returns the raw
     Anthropic message (content blocks + stop_reason). The caller executes any tool_use
@@ -1047,7 +1066,7 @@ def run_model(messages: list[dict[str, Any]]) -> Any:
     return _client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
-        system=SYSTEM_PROMPT,
+        system=_system_blocks(),
         tools=tools,
         messages=messages,
     )
