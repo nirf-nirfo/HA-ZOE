@@ -1,8 +1,6 @@
-import json
-from dataclasses import asdict, dataclass, fields, replace
-from pathlib import Path
+from dataclasses import dataclass, replace
 
-from app.logging_config import logger
+from app._store import Store
 from app.settings import settings
 
 # Per-sender briefing schedule: morning (full agenda for today) at (hour, minute)
@@ -25,34 +23,15 @@ class BriefingConfig:
     last_evening_sent_date: str | None = None
 
 
-_FIELDS = {f.name for f in fields(BriefingConfig)}
-
-
-def _from_dict(d: dict) -> BriefingConfig:
-    # Ignore any legacy fields not on the current schema, so an old briefing_config.json
-    # written before evening support was added still loads cleanly.
-    return BriefingConfig(**{k: v for k, v in d.items() if k in _FIELDS})
+_store: Store[BriefingConfig] = Store(lambda: settings.briefing_config_path, BriefingConfig)
 
 
 def _load() -> list[BriefingConfig]:
-    path = Path(settings.briefing_config_path)
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return [_from_dict(c) for c in data]
-    except Exception:
-        logger.warning("Could not load briefing config file, starting fresh")
-        return []
+    return _store.load_list()
 
 
 def _save(configs: list[BriefingConfig]) -> None:
-    path = Path(settings.briefing_config_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps([asdict(c) for c in configs], ensure_ascii=False),
-        encoding="utf-8",
-    )
+    _store.save_list(configs)
 
 
 def set_config(sender: str, hour: int, minute: int, enabled: bool = True) -> BriefingConfig:
