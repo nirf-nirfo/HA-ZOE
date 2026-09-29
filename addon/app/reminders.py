@@ -219,6 +219,19 @@ def delete_all_reminders(sender: str) -> int:
     return deleted
 
 
+def count_all() -> int:
+    """Total number of stored reminders (all senders, all recurrences). Cheap
+    summary for /admin/status; loads the file once."""
+    return len(_load())
+
+
+def next_fire_at() -> float | None:
+    """Earliest future send_at across all senders, or None if nothing pending."""
+    now = time.time()
+    times = [r.send_at for r in _load() if r.send_at > now]
+    return min(times) if times else None
+
+
 def yearly_for_date(sender: str, month: int, day: int) -> list[Reminder]:
     """Yearly reminders whose original calendar day matches (month, day). Used by
     the morning briefing to surface birthdays; yearly reminders no longer fire as

@@ -2,11 +2,14 @@ import asyncio
 import base64
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 _IL_TZ = ZoneInfo("Asia/Jerusalem")
 
-from fastapi import FastAPI, Request, Response
+import httpx
+import yaml
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 
 from app.claude_agent import (
     AGENDA_TOOLS,
@@ -57,6 +60,164 @@ app = FastAPI(title="ZOE")
 
 # Safety cap on the agentic tool-use loop, so a confused turn can't call tools forever.
 _MAX_AGENT_ITERS = 6
+
+# --- Item 07: health/status tracking --------------------------------------
+# Process-wide start time and per-loop heartbeats consumed by /health and
+# /admin/status. `_beat(name, ok=...)` is called by each background loop at
+# the top of every tick; anything that raises inside a loop bumps
+# consecutive_errors, and a healthy tick resets it to zero.
+_STARTUP_TS: float = time.time()
+_LOOP_NAMES = (
+    "reminder", "monitor", "scheduled_action",
+    "daily_briefing", "check_in", "meta_window",
+)
+_LOOP_HEARTBEAT: dict[str, dict[str, float | int]] = {
+    name: {"last_tick_at": 0.0, "consecutive_errors": 0} for name in _LOOP_NAMES
+}
+
+
+def _beat(name: str, ok: bool = True) -> None:
+    """Records a loop tick. Never raises — a broken heartbeat must not break its loop."""
+    try:
+        entry = _LOOP_HEARTBEAT.get(name)
+        if entry is None:
+            return
+        entry["last_tick_at"] = time.time()
+        if ok:
+            entry["consecutive_errors"] = 0
+        else:
+            entry["consecutive_errors"] = int(entry["consecutive_errors"]) + 1
+    except Exception:
+        pass
+
+
+def _load_version() -> str:
+    """Reads the deployed version from addon/config.yaml once at import time."""
+    try:
+        cfg_path = Path(__file__).parent.parent / "config.yaml"
+        with cfg_path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        return str(data.get("version", "unknown"))
+    except Exception:
+        return "unknown"
+
+
+_VERSION = _load_version()
+
+# Cached reachability probes. Anthropic list() and HA HEAD are cheap but not
+# free; /health is likely to be polled by an HA dashboard card, so cache both.
+_reach_cache: dict[str, tuple[float, bool]] = {}
+_ANTHROPIC_TTL = 60.0
+_HA_TTL = 30.0
+
+
+async def _check_anthropic_reachable() -> bool:
+    now = time.time()
+    ts, cached = _reach_cache.get("anthropic", (0.0, False))
+    if ts and now - ts < _ANTHROPIC_TTL:
+        return cached
+    from app.claude_agent import _client  # local import: avoid cycle at module load
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(lambda: _client.models.list()), timeout=3.0
+        )
+        ok = True
+    except Exception:
+        ok = False
+    _reach_cache["anthropic"] = (now, ok)
+    return ok
+
+
+async def _check_ha_reachable() -> bool:
+    now = time.time()
+    ts, cached = _reach_cache.get("ha", (0.0, False))
+    if ts and now - ts < _HA_TTL:
+        return cached
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            resp = await client.head(f"{settings.ha_base_url.rstrip('/')}/api/")
+        ok = resp.status_code < 500
+    except Exception:
+        ok = False
+    _reach_cache["ha"] = (now, ok)
+    return ok
+
+
+async def _health_payload() -> dict:
+    anthropic_ok = await _check_anthropic_reachable()
+    ha_ok = await _check_ha_reachable()
+    loops_unhealthy = any(
+        int(v["consecutive_errors"]) > 3 for v in _LOOP_HEARTBEAT.values()
+    )
+    status = "ok" if (anthropic_ok and ha_ok and not loops_unhealthy) else "degraded"
+    return {
+        "status": status,
+        "version": _VERSION,
+        "uptime_seconds": int(time.time() - _STARTUP_TS),
+        "anthropic_reachable": anthropic_ok,
+        "ha_reachable": ha_ok,
+        "loops": {k: dict(v) for k, v in _LOOP_HEARTBEAT.items()},
+    }
+
+
+@app.get("/health")
+async def health() -> dict:
+    """Unauthenticated, high-level liveness/degradation snapshot. No secrets."""
+    return await _health_payload()
+
+
+def _require_lan(request: Request) -> None:
+    """FastAPI dep: allow /admin/status only from RFC1918 or loopback callers.
+    Cheaper than middleware for a single route and keeps the check colocated."""
+    host = request.client.host if request.client else ""
+    if not (host.startswith("192.168.") or host.startswith("127.") or host.startswith("10.")):
+        raise HTTPException(status_code=403, detail="LAN only")
+
+
+@app.get("/admin/status", dependencies=[Depends(_require_lan)])
+async def admin_status() -> dict:
+    """LAN-only. Richer inspection of every store — counts and single summary
+    fields only, never full objects. Safe to bookmark from a browser on the
+    home network; a public reverse proxy must not be pointed at this route."""
+    now = time.time()
+    entries = inbound_tracker.all_senders()
+    meta_window = {
+        sender: {
+            "last_inbound_hours_ago": round((now - e.last_inbound_at) / 3600, 2),
+            "warned_23h": e.warned_23h,
+        }
+        for sender, e in entries.items()
+    }
+    return {
+        "health": await _health_payload(),
+        "stores": {
+            "reminders": {
+                "count": reminders_mod.count_all(),
+                "next_fire_at": reminders_mod.next_fire_at(),
+            },
+            "check_ins": {
+                "count": check_ins.count_all(),
+                "next_fire_at": check_ins.next_fire_at(),
+            },
+            "expenses": {
+                "count": expenses.count_all(),
+                "total_this_month": expenses.summary(period="this_month")["total"],
+            },
+            "anchors": {"count": len(anchors.list_all())},
+            "personal_tasks": {"count_by_sender": personal_tasks.count_by_sender()},
+            "recurring_expenses": {"count": len(recurring_expenses.list_all())},
+            "monitors": {"count": monitors.count_active()},
+            "scheduled_actions": {
+                "count": scheduled_actions.count_pending(),
+                "next_fire_at": scheduled_actions.next_fire_at(),
+            },
+            "briefing": {"configured_senders": len(briefing.all_configs())},
+        },
+        "senders": {
+            "allowed": sorted(_allowed_senders()),
+            "meta_window": meta_window,
+        },
+    }
 
 # Meta's WhatsApp free-tier 24h window bookkeeping. We warn the user at ~23h so
 # they have time to send a quick inbound and reopen the window before outbound
@@ -209,6 +370,7 @@ async def _compile_evening_briefing(sender: str, today: datetime, tomorrow: date
 async def _daily_briefing_loop() -> None:
     while True:
         await asyncio.sleep(60)
+        _beat("daily_briefing")
         try:
             now_il = datetime.now(_IL_TZ)
             today_str = now_il.strftime("%Y-%m-%d")
@@ -244,15 +406,18 @@ async def _daily_briefing_loop() -> None:
             agenda.purge_before(today_str)
             anchors.purge_suppressions_before(today_str)
         except Exception:
+            _beat("daily_briefing", ok=False)
             logger.exception("Daily briefing loop: tick failed")
 
 
 async def _scheduled_action_loop() -> None:
     while True:
         await asyncio.sleep(60)
+        _beat("scheduled_action")
         try:
             due = scheduled_actions.pop_due()
         except Exception:
+            _beat("scheduled_action", ok=False)
             logger.exception("Scheduled action loop: pop_due failed")
             continue
         for a in due:
@@ -283,10 +448,12 @@ async def _scheduled_action_loop() -> None:
 async def _monitor_loop() -> None:
     while True:
         await asyncio.sleep(60)
+        _beat("monitor")
         now = time.time()
         try:
             due = monitors.get_due(now)
         except Exception:
+            _beat("monitor", ok=False)
             logger.exception("Monitor loop: get_due failed")
             continue
         for m in due:
@@ -310,9 +477,11 @@ async def _monitor_loop() -> None:
 async def _check_in_loop() -> None:
     while True:
         await asyncio.sleep(60)
+        _beat("check_in")
         try:
             due = check_ins.pop_due()
         except Exception:
+            _beat("check_in", ok=False)
             logger.exception("Check-in loop: pop_due failed")
             continue
         for c in due:
@@ -377,9 +546,11 @@ async def _meta_window_loop() -> None:
     inactive_cutoff = _INACTIVE_CUTOFF_HOURS * 3600
     while True:
         await asyncio.sleep(300)
+        _beat("meta_window")
         try:
             entries = inbound_tracker.all_senders()
         except Exception:
+            _beat("meta_window", ok=False)
             logger.exception("Meta-window loop: all_senders failed")
             continue
         now = time.time()
@@ -404,11 +575,13 @@ async def _meta_window_loop() -> None:
 async def _reminder_loop() -> None:
     while True:
         await asyncio.sleep(60)
+        _beat("reminder")
         # Guard the whole tick: a bad reminder or a failed send must never kill the
         # loop, or reminders would silently stop firing forever while the app stays up.
         try:
             due = pop_due()
         except Exception:
+            _beat("reminder", ok=False)
             logger.exception("Reminder loop: pop_due failed")
             continue
         for reminder in due:

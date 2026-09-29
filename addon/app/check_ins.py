@@ -148,6 +148,18 @@ def remove(check_in_id: str, sender: str) -> bool:
     return True
 
 
+def count_all() -> int:
+    """Total number of stored check-ins (all senders). Summary for /admin/status."""
+    return len(_load())
+
+
+def next_fire_at() -> float | None:
+    """Earliest future next_at across all senders, or None if nothing pending."""
+    now = time.time()
+    times = [c.next_at for c in _load() if c.next_at > now]
+    return min(times) if times else None
+
+
 def pop_due() -> list[CheckIn]:
     """Removes/reschedules check-ins whose time has come, returns them for firing."""
     now = time.time()
