@@ -1091,17 +1091,32 @@ def run_model(messages: list[dict[str, Any]]) -> Any:
     )
 
 
-def run_check_in_model(messages: list[dict[str, Any]]) -> Any:
-    """One turn of a check-in agent loop, restricted to read-only tools."""
-    all_tools = _build_tools(_load_entities())
-    tools = [
-        t for t in all_tools
+def _build_cached_check_in_tools() -> list[dict[str, Any]]:
+    """The check-in tool subset, with cache_control on the last entry.
+
+    We filter the already-built full list (which drops the cache_control
+    marker from the old last tool if it isn't in the subset) then re-apply
+    the marker to the new last tool so the subset also caches.
+    """
+    subset = [
+        {k: v for k, v in t.items() if k != "cache_control"}
+        for t in _CACHED_TOOLS
         if t.get("name") in CHECK_IN_ALLOWED_TOOLS or t.get("type") == "web_search_20250305"
     ]
+    if subset:
+        subset[-1] = {**subset[-1], "cache_control": {"type": "ephemeral"}}
+    return subset
+
+
+_CHECK_IN_CACHED_TOOLS = _build_cached_check_in_tools()
+
+
+def run_check_in_model(messages: list[dict[str, Any]]) -> Any:
+    """One turn of a check-in agent loop, restricted to read-only tools."""
     return _client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
-        system=SYSTEM_PROMPT + CHECK_IN_SYSTEM_SUFFIX,
-        tools=tools,
+        system=_system_blocks(closing_extra=CHECK_IN_SYSTEM_SUFFIX),
+        tools=_CHECK_IN_CACHED_TOOLS,
         messages=messages,
     )
