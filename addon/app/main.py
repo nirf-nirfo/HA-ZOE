@@ -165,6 +165,60 @@ async def health() -> dict:
     """Unauthenticated, high-level liveness/degradation snapshot. No secrets."""
     return await _health_payload()
 
+
+def _require_lan(request: Request) -> None:
+    """FastAPI dep: allow /admin/status only from RFC1918 or loopback callers.
+    Cheaper than middleware for a single route and keeps the check colocated."""
+    host = request.client.host if request.client else ""
+    if not (host.startswith("192.168.") or host.startswith("127.") or host.startswith("10.")):
+        raise HTTPException(status_code=403, detail="LAN only")
+
+
+@app.get("/admin/status", dependencies=[Depends(_require_lan)])
+async def admin_status() -> dict:
+    """LAN-only. Richer inspection of every store — counts and single summary
+    fields only, never full objects. Safe to bookmark from a browser on the
+    home network; a public reverse proxy must not be pointed at this route."""
+    now = time.time()
+    entries = inbound_tracker.all_senders()
+    meta_window = {
+        sender: {
+            "last_inbound_hours_ago": round((now - e.last_inbound_at) / 3600, 2),
+            "warned_23h": e.warned_23h,
+        }
+        for sender, e in entries.items()
+    }
+    return {
+        "health": await _health_payload(),
+        "stores": {
+            "reminders": {
+                "count": reminders_mod.count_all(),
+                "next_fire_at": reminders_mod.next_fire_at(),
+            },
+            "check_ins": {
+                "count": check_ins.count_all(),
+                "next_fire_at": check_ins.next_fire_at(),
+            },
+            "expenses": {
+                "count": expenses.count_all(),
+                "total_this_month": expenses.summary(period="this_month")["total"],
+            },
+            "anchors": {"count": len(anchors.list_all())},
+            "personal_tasks": {"count_by_sender": personal_tasks.count_by_sender()},
+            "recurring_expenses": {"count": len(recurring_expenses.list_all())},
+            "monitors": {"count": monitors.count_active()},
+            "scheduled_actions": {
+                "count": scheduled_actions.count_pending(),
+                "next_fire_at": scheduled_actions.next_fire_at(),
+            },
+            "briefing": {"configured_senders": len(briefing.all_configs())},
+        },
+        "senders": {
+            "allowed": sorted(_allowed_senders()),
+            "meta_window": meta_window,
+        },
+    }
+
 # Meta's WhatsApp free-tier 24h window bookkeeping. We warn the user at ~23h so
 # they have time to send a quick inbound and reopen the window before outbound
 # messages start silently failing. Senders who haven't messaged in >48h are

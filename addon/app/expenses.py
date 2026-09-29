@@ -194,6 +194,11 @@ def summary(
     }
 
 
+def count_all() -> int:
+    """Total number of stored expenses (all senders, all months). Summary for /admin/status."""
+    return len(_load())
+
+
 def total_for_sender_on_date(sender: str, date: str) -> float:
     """Sum of a sender's manual/receipt expenses on `date` — used by the evening briefing."""
     return round(

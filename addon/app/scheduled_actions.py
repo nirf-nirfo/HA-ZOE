@@ -132,6 +132,19 @@ def delete_action(action_id: str, sender: str) -> bool:
     return True
 
 
+def count_pending() -> int:
+    """Number of not-yet-run scheduled actions (all senders). Summary for /admin/status."""
+    now = time.time()
+    return sum(1 for a in _load() if a.run_at > now)
+
+
+def next_fire_at() -> float | None:
+    """Earliest future run_at across all senders, or None if nothing pending."""
+    now = time.time()
+    times = [a.run_at for a in _load() if a.run_at > now]
+    return min(times) if times else None
+
+
 def pop_due() -> list[ScheduledAction]:
     """Removes and returns actions whose time has come. One-shot: never rescheduled."""
     now = time.time()

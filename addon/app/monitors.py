@@ -123,6 +123,12 @@ def find_matching(sender: str, identifier: str) -> list[Monitor]:
     return [m for m in active if needle and needle in m.entity_name.lower()]
 
 
+def count_active() -> int:
+    """Number of monitors that haven't reached their end time. Summary for /admin/status."""
+    now = time.time()
+    return sum(1 for m in _load() if m.until > now)
+
+
 def delete_monitor(monitor_id: str, sender: str) -> bool:
     monitors = _load()
     new = [m for m in monitors if not (m.id == monitor_id and m.sender == sender)]
