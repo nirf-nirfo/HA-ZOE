@@ -1,7 +1,7 @@
 import json
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 from app.logging_config import logger
@@ -21,13 +21,21 @@ class AgendaItem:
     added_at: float
 
 
+_FIELDS = {f.name for f in fields(AgendaItem)}
+
+
+def _from_dict(d: dict) -> AgendaItem:
+    # Drop unknown keys so a row from a future version can't kill the load.
+    return AgendaItem(**{k: v for k, v in d.items() if k in _FIELDS})
+
+
 def _load() -> list[AgendaItem]:
     path = Path(settings.agenda_path)
     if not path.exists():
         return []
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return [AgendaItem(**i) for i in data]
+        return [_from_dict(i) for i in data]
     except Exception:
         logger.warning("Could not load agenda file, starting fresh")
         return []

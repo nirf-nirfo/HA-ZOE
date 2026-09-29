@@ -1,7 +1,7 @@
 import json
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 from app.logging_config import logger
@@ -31,6 +31,19 @@ class Suppression:
     date: str  # ISO YYYY-MM-DD
 
 
+_ANCHOR_FIELDS = {f.name for f in fields(Anchor)}
+_SUPPRESSION_FIELDS = {f.name for f in fields(Suppression)}
+
+
+def _anchor_from_dict(d: dict) -> Anchor:
+    # Drop unknown keys so a row from a future version can't kill the load.
+    return Anchor(**{k: v for k, v in d.items() if k in _ANCHOR_FIELDS})
+
+
+def _suppression_from_dict(d: dict) -> Suppression:
+    return Suppression(**{k: v for k, v in d.items() if k in _SUPPRESSION_FIELDS})
+
+
 def _load() -> dict:
     path = Path(settings.anchors_path)
     if not path.exists():
@@ -38,8 +51,8 @@ def _load() -> dict:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         return {
-            "anchors": [Anchor(**a) for a in data.get("anchors", [])],
-            "suppressions": [Suppression(**s) for s in data.get("suppressions", [])],
+            "anchors": [_anchor_from_dict(a) for a in data.get("anchors", [])],
+            "suppressions": [_suppression_from_dict(s) for s in data.get("suppressions", [])],
         }
     except Exception:
         logger.warning("Could not load anchors file, starting fresh")

@@ -2,7 +2,7 @@ import calendar
 import json
 import time
 import uuid
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -93,13 +93,21 @@ def normalize_recurring() -> int:
     return changed
 
 
+_FIELDS = {f.name for f in fields(Reminder)}
+
+
+def _from_dict(d: dict) -> Reminder:
+    # Drop unknown keys so a row from a future version can't kill the load.
+    return Reminder(**{k: v for k, v in d.items() if k in _FIELDS})
+
+
 def _load() -> list[Reminder]:
     path = Path(settings.reminders_path)
     if not path.exists():
         return []
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return [Reminder(**r) for r in data]
+        return [_from_dict(r) for r in data]
     except Exception:
         logger.warning("Could not load reminders file, starting fresh")
         return []

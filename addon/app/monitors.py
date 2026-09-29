@@ -1,7 +1,7 @@
 import json
 import time
 import uuid
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 
 from app.logging_config import logger
@@ -26,13 +26,21 @@ class Monitor:
     last_state: str | None = None
 
 
+_FIELDS = {f.name for f in fields(Monitor)}
+
+
+def _from_dict(d: dict) -> Monitor:
+    # Drop unknown keys so a row from a future version can't kill the load.
+    return Monitor(**{k: v for k, v in d.items() if k in _FIELDS})
+
+
 def _load() -> list[Monitor]:
     path = Path(settings.monitors_path)
     if not path.exists():
         return []
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return [Monitor(**m) for m in data]
+        return [_from_dict(m) for m in data]
     except Exception:
         logger.warning("Could not load monitors file, starting fresh")
         return []

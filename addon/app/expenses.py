@@ -1,7 +1,7 @@
 import json
 import time
 import uuid
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -39,13 +39,21 @@ class Expense:
     created_at: float
 
 
+_FIELDS = {f.name for f in fields(Expense)}
+
+
+def _from_dict(d: dict) -> Expense:
+    # Drop unknown keys so a row from a future version can't kill the load.
+    return Expense(**{k: v for k, v in d.items() if k in _FIELDS})
+
+
 def _load() -> list[Expense]:
     path = Path(settings.expenses_path)
     if not path.exists():
         return []
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return [Expense(**e) for e in data]
+        return [_from_dict(e) for e in data]
     except Exception:
         logger.warning("Could not load expenses file, starting fresh")
         return []

@@ -1,7 +1,7 @@
 import json
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 from app.logging_config import logger
@@ -16,13 +16,21 @@ class ListItem:
     added_at: float
 
 
+_FIELDS = {f.name for f in fields(ListItem)}
+
+
+def _from_dict(d: dict) -> ListItem:
+    # Drop unknown keys so a row from a future version can't kill the load.
+    return ListItem(**{k: v for k, v in d.items() if k in _FIELDS})
+
+
 def _load() -> dict[str, list[ListItem]]:
     path = Path(settings.lists_path)
     if not path.exists():
         return {}
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        return {name: [ListItem(**i) for i in items] for name, items in raw.items()}
+        return {name: [_from_dict(i) for i in items] for name, items in raw.items()}
     except Exception:
         logger.warning("Could not load lists file, starting fresh")
         return {}

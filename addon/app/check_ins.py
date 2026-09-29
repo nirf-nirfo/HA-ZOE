@@ -2,7 +2,7 @@ import calendar
 import json
 import time
 import uuid
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -34,13 +34,22 @@ class CheckIn:
     interval_minutes: int | None = None
 
 
+_FIELDS = {f.name for f in fields(CheckIn)}
+
+
+def _from_dict(d: dict) -> CheckIn:
+    # Drop unknown keys so a persisted row from a future version (or a manual edit)
+    # cannot poison the whole store with a TypeError.
+    return CheckIn(**{k: v for k, v in d.items() if k in _FIELDS})
+
+
 def _load() -> list[CheckIn]:
     path = Path(settings.check_ins_path)
     if not path.exists():
         return []
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return [CheckIn(**c) for c in data]
+        return [_from_dict(c) for c in data]
     except Exception:
         logger.warning("Could not load check_ins file, starting fresh")
         return []
