@@ -33,7 +33,7 @@ from app.lists import add_item, clear_list, get_all_list_names, get_list, remove
 from app.memory import forget, remember
 from app import (
     agenda, anchors, briefing, check_ins, conversation, conversation_log, expenses,
-    holidays, monitors, personal_tasks, recurring_expenses, scheduled_actions,
+    holidays, inbound_tracker, monitors, personal_tasks, recurring_expenses, scheduled_actions,
 )
 from app import reminders as reminders_mod
 from app.reminders import (
@@ -58,6 +58,17 @@ app = FastAPI(title="ZOE")
 # Safety cap on the agentic tool-use loop, so a confused turn can't call tools forever.
 _MAX_AGENT_ITERS = 6
 
+# Meta's WhatsApp free-tier 24h window bookkeeping. We warn the user at ~23h so
+# they have time to send a quick inbound and reopen the window before outbound
+# messages start silently failing. Senders who haven't messaged in >48h are
+# considered inactive-by-design and are not pinged.
+_META_WINDOW_HOURS = 24
+_WARN_AT_HOURS = 23
+_INACTIVE_CUTOFF_HOURS = 48
+_META_WINDOW_WARNING = (
+    "⏰ עוד שעה החלון של Meta נסגר. שלח לי הודעה קצרה (\"היי\") כדי לפתוח אותו מחדש."
+)
+
 
 @app.on_event("startup")
 async def startup() -> None:
@@ -69,6 +80,7 @@ async def startup() -> None:
     asyncio.create_task(_scheduled_action_loop())
     asyncio.create_task(_daily_briefing_loop())
     asyncio.create_task(_check_in_loop())
+    asyncio.create_task(_meta_window_loop())
 
 
 # Python's weekday() returns Monday=0..Sunday=6; anchors use Sunday..Saturday strings.
@@ -356,6 +368,39 @@ async def _run_check_in(sender: str, ci_prompt: str) -> None:
     conversation_log.append(sender, marker, final_text)
 
 
+async def _meta_window_loop() -> None:
+    """Warns each allowed sender once, at ~23h into Meta's 24h free-tier window,
+    so they can send a quick inbound and keep the window open. Senders inactive
+    for more than 48h are skipped (they aren't actively conversing)."""
+    warn_lo = _WARN_AT_HOURS * 3600
+    warn_hi = _META_WINDOW_HOURS * 3600
+    inactive_cutoff = _INACTIVE_CUTOFF_HOURS * 3600
+    while True:
+        await asyncio.sleep(300)
+        try:
+            entries = inbound_tracker.all_senders()
+        except Exception:
+            logger.exception("Meta-window loop: all_senders failed")
+            continue
+        now = time.time()
+        allowed = _allowed_senders()
+        for sender, entry in entries.items():
+            try:
+                if sender not in allowed:
+                    continue
+                elapsed = now - entry.last_inbound_at
+                if elapsed >= inactive_cutoff:
+                    continue
+                if entry.warned_23h:
+                    continue
+                if warn_lo <= elapsed < warn_hi:
+                    logger.info("Meta-window loop: warning %s at %.1fh", sender, elapsed / 3600)
+                    await send_message(sender, _META_WINDOW_WARNING)
+                    inbound_tracker.mark_warned(sender)
+            except Exception:
+                logger.exception("Meta-window loop: failed for %s", sender)
+
+
 async def _reminder_loop() -> None:
     while True:
         await asyncio.sleep(60)
@@ -412,6 +457,13 @@ def _allowed_senders() -> set[str]:
 
 async def _process_message(parsed) -> None:
     sender = parsed.sender
+    # Sender was already verified as allowed in receive_webhook. Refresh the
+    # Meta 24h-window tracker on every real inbound so _meta_window_loop can
+    # warn the user before the window closes.
+    try:
+        inbound_tracker.record_inbound(sender)
+    except Exception:
+        logger.exception("Failed to record inbound for %s", sender)
     text = parsed.text
     image_block = None
 
