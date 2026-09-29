@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -11,7 +12,32 @@ from anthropic import Anthropic
 from app.memory import all_facts
 from app.settings import settings
 
+logger = logging.getLogger(__name__)
+
 _client = Anthropic(api_key=settings.anthropic_api_key)
+
+
+def _log_usage(label: str, usage: Any) -> None:
+    """Log input / cache_read / cache_write / output token counts for a turn.
+
+    Emitted only when the SDK actually returns cache-related counts, so pre-
+    caching baseline turns stay quiet. Lets us eyeball cache hit rate in the
+    add-on logs without a dedicated metrics endpoint.
+    """
+    if usage is None:
+        return
+    cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+    cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+    if not (cache_read or cache_write):
+        return
+    logger.info(
+        "%s tokens: input=%d cache_read=%d cache_write=%d output=%d",
+        label,
+        getattr(usage, "input_tokens", 0) or 0,
+        cache_read,
+        cache_write,
+        getattr(usage, "output_tokens", 0) or 0,
+    )
 
 _CONTROL_TOOL = "control_device"
 _STATUS_TOOL = "get_device_status"
@@ -1082,13 +1108,15 @@ def run_model(messages: list[dict[str, Any]]) -> Any:
     """One turn of the agentic loop: sends the running transcript and returns the raw
     Anthropic message (content blocks + stop_reason). The caller executes any tool_use
     blocks, appends the results, and calls again until stop_reason is not tool_use."""
-    return _client.messages.create(
+    resp = _client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
         system=_system_blocks(),
         tools=_CACHED_TOOLS,
         messages=messages,
     )
+    _log_usage("run_model", getattr(resp, "usage", None))
+    return resp
 
 
 def _build_cached_check_in_tools() -> list[dict[str, Any]]:
@@ -1113,10 +1141,12 @@ _CHECK_IN_CACHED_TOOLS = _build_cached_check_in_tools()
 
 def run_check_in_model(messages: list[dict[str, Any]]) -> Any:
     """One turn of a check-in agent loop, restricted to read-only tools."""
-    return _client.messages.create(
+    resp = _client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
         system=_system_blocks(closing_extra=CHECK_IN_SYSTEM_SUFFIX),
         tools=_CHECK_IN_CACHED_TOOLS,
         messages=messages,
     )
+    _log_usage("run_check_in_model", getattr(resp, "usage", None))
+    return resp
