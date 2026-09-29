@@ -1,10 +1,8 @@
-import json
 import time
 import uuid
-from dataclasses import asdict, dataclass, fields
-from pathlib import Path
+from dataclasses import dataclass
 
-from app.logging_config import logger
+from app._store import Store
 from app.settings import settings
 
 # A scheduled action is a device command Zoe executes for real at a future time —
@@ -27,33 +25,15 @@ class ScheduledAction:
     duration_minutes: float | None = None
 
 
-_FIELDS = {f.name for f in fields(ScheduledAction)}
-
-
-def _from_dict(d: dict) -> ScheduledAction:
-    # Drop unknown keys so a row from a future version can't kill the load.
-    return ScheduledAction(**{k: v for k, v in d.items() if k in _FIELDS})
+_store: Store[ScheduledAction] = Store(lambda: settings.scheduled_actions_path, ScheduledAction)
 
 
 def _load() -> list[ScheduledAction]:
-    path = Path(settings.scheduled_actions_path)
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return [_from_dict(a) for a in data]
-    except Exception:
-        logger.warning("Could not load scheduled actions file, starting fresh")
-        return []
+    return _store.load_list()
 
 
 def _save(actions: list[ScheduledAction]) -> None:
-    path = Path(settings.scheduled_actions_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps([asdict(a) for a in actions], ensure_ascii=False),
-        encoding="utf-8",
-    )
+    _store.save_list(actions)
 
 
 def find_duplicate(
