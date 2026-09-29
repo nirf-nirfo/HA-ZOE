@@ -370,6 +370,7 @@ async def _compile_evening_briefing(sender: str, today: datetime, tomorrow: date
 async def _daily_briefing_loop() -> None:
     while True:
         await asyncio.sleep(60)
+        _beat("daily_briefing")
         try:
             now_il = datetime.now(_IL_TZ)
             today_str = now_il.strftime("%Y-%m-%d")
@@ -405,15 +406,18 @@ async def _daily_briefing_loop() -> None:
             agenda.purge_before(today_str)
             anchors.purge_suppressions_before(today_str)
         except Exception:
+            _beat("daily_briefing", ok=False)
             logger.exception("Daily briefing loop: tick failed")
 
 
 async def _scheduled_action_loop() -> None:
     while True:
         await asyncio.sleep(60)
+        _beat("scheduled_action")
         try:
             due = scheduled_actions.pop_due()
         except Exception:
+            _beat("scheduled_action", ok=False)
             logger.exception("Scheduled action loop: pop_due failed")
             continue
         for a in due:
@@ -444,10 +448,12 @@ async def _scheduled_action_loop() -> None:
 async def _monitor_loop() -> None:
     while True:
         await asyncio.sleep(60)
+        _beat("monitor")
         now = time.time()
         try:
             due = monitors.get_due(now)
         except Exception:
+            _beat("monitor", ok=False)
             logger.exception("Monitor loop: get_due failed")
             continue
         for m in due:
@@ -471,9 +477,11 @@ async def _monitor_loop() -> None:
 async def _check_in_loop() -> None:
     while True:
         await asyncio.sleep(60)
+        _beat("check_in")
         try:
             due = check_ins.pop_due()
         except Exception:
+            _beat("check_in", ok=False)
             logger.exception("Check-in loop: pop_due failed")
             continue
         for c in due:
@@ -538,9 +546,11 @@ async def _meta_window_loop() -> None:
     inactive_cutoff = _INACTIVE_CUTOFF_HOURS * 3600
     while True:
         await asyncio.sleep(300)
+        _beat("meta_window")
         try:
             entries = inbound_tracker.all_senders()
         except Exception:
+            _beat("meta_window", ok=False)
             logger.exception("Meta-window loop: all_senders failed")
             continue
         now = time.time()
@@ -565,11 +575,13 @@ async def _meta_window_loop() -> None:
 async def _reminder_loop() -> None:
     while True:
         await asyncio.sleep(60)
+        _beat("reminder")
         # Guard the whole tick: a bad reminder or a failed send must never kill the
         # loop, or reminders would silently stop firing forever while the app stays up.
         try:
             due = pop_due()
         except Exception:
+            _beat("reminder", ok=False)
             logger.exception("Reminder loop: pop_due failed")
             continue
         for reminder in due:
