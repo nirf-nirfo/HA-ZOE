@@ -15,21 +15,35 @@ class HomeAssistantClient:
         }
 
     async def get_states(self, entity_ids: list[str]) -> dict[str, Any]:
-        """Returns {entity_id: state_dict} for the requested entities only."""
-        states: dict[str, Any] = {}
+        """Returns {entity_id: state_dict} for the requested entities only.
+
+        Issues a single GET /api/states request and filters the response in
+        Python, instead of one round-trip per entity. HA returns every entity
+        in the system; we drop everything the caller didn't ask for before
+        returning, so downstream memory use is unchanged.
+        """
         async with httpx.AsyncClient(timeout=10) as client:
-            for entity_id in entity_ids:
-                resp = await client.get(
-                    f"{self._base_url}/api/states/{entity_id}",
-                    headers=self._headers,
-                )
-                if resp.status_code == 200:
-                    states[entity_id] = resp.json()
-                else:
-                    logger.warning(
-                        "Could not fetch state for %s: HTTP %s", entity_id, resp.status_code
-                    )
-        return states
+            resp = await client.get(
+                f"{self._base_url}/api/states",
+                headers=self._headers,
+            )
+
+        if resp.status_code != 200:
+            logger.warning(
+                "Could not fetch states from HA: HTTP %s", resp.status_code
+            )
+            return {}
+
+        requested = set(entity_ids)
+        by_entity: dict[str, Any] = {
+            item["entity_id"]: item
+            for item in resp.json()
+            if item.get("entity_id") in requested
+        }
+        for entity_id in entity_ids:
+            if entity_id not in by_entity:
+                logger.warning("Could not fetch state for %s: not in HA response", entity_id)
+        return by_entity
 
     async def call_service(
         self, domain: str, service: str, entity_id: str, service_data: dict | None = None
