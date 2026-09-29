@@ -1,8 +1,6 @@
-import json
 import time
-from pathlib import Path
 
-from app.logging_config import logger
+from app._store import Store
 from app.settings import settings
 
 # Short-term per-sender conversation memory: prior user/assistant turns so
@@ -15,21 +13,17 @@ _MAX_MESSAGES = 40  # 20 exchanges
 _TTL_SECONDS = 24 * 60 * 60
 
 
+# Raw dict payload — no dataclass, just needs corruption-tolerant load and
+# atomic write.
+_store: Store = Store(lambda: settings.conversation_path)
+
+
 def _load() -> dict:
-    path = Path(settings.conversation_path)
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        logger.warning("Could not load conversation file, starting fresh")
-        return {}
+    return _store.load_dict()
 
 
 def _save(data: dict) -> None:
-    path = Path(settings.conversation_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    _store.save_dict(data)
 
 
 def recent(sender: str) -> list[dict]:
