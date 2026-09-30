@@ -135,6 +135,34 @@ def anchors_for_date(day: str, date: str) -> list[Anchor]:
     return [a for a in data["anchors"] if a.day == day.lower() and a.id not in supp_ids]
 
 
+# Heuristic markers for a school-related anchor. Anything Hebrew or English
+# that unambiguously points at "kid finishes school / school pickup / class"
+# without dragging in unrelated חוגים. Kept narrow on purpose — the tool
+# schema is the primary path; this is a one-time back-fill.
+_SCHOOL_MARKERS = ("בית ספר", "מסיימת", "כיתה", "school")
+
+
+def auto_tag_school() -> int:
+    """One-shot migration: add the 'school' tag to anchors whose free text
+    is clearly school-related. Idempotent — anchors already tagged 'school'
+    are left alone. Returns how many rows were updated."""
+    data = _load()
+    updated = 0
+    for a in data["anchors"]:
+        if "school" in a.tags:
+            continue
+        text_l = (a.text or "").lower()
+        # Hebrew comparison stays case-sensitive (no case in Hebrew); English
+        # goes through the lowercased needle.
+        if any(m in a.text for m in _SCHOOL_MARKERS if not m.isascii()) or \
+           any(m in text_l for m in _SCHOOL_MARKERS if m.isascii()):
+            a.tags = list(a.tags) + ["school"]
+            updated += 1
+    if updated:
+        _save(data)
+    return updated
+
+
 def purge_suppressions_before(cutoff_date: str) -> int:
     data = _load()
     new_supps = [s for s in data["suppressions"] if s.date >= cutoff_date]

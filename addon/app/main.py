@@ -241,6 +241,9 @@ async def startup() -> None:
     fixed = normalize_recurring()
     if fixed:
         logger.info("Self-healed %d yearly reminder(s) to their correct next occurrence", fixed)
+    tagged = anchors.auto_tag_school()
+    if tagged:
+        logger.info("Auto-tagged %d anchor(s) as 'school' from text heuristics", tagged)
     asyncio.create_task(_reminder_loop())
     asyncio.create_task(_monitor_loop())
     asyncio.create_task(_scheduled_action_loop())
