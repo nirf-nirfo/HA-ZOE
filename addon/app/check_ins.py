@@ -1,13 +1,11 @@
 import calendar
-import json
 import time
 import uuid
-from dataclasses import asdict, dataclass, fields, replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from app.logging_config import logger
+from app._store import Store
 from app.settings import settings
 
 _IL_TZ = ZoneInfo("Asia/Jerusalem")
@@ -34,34 +32,16 @@ class CheckIn:
     interval_minutes: int | None = None
 
 
-_FIELDS = {f.name for f in fields(CheckIn)}
-
-
-def _from_dict(d: dict) -> CheckIn:
-    # Drop unknown keys so a persisted row from a future version (or a manual edit)
-    # cannot poison the whole store with a TypeError.
-    return CheckIn(**{k: v for k, v in d.items() if k in _FIELDS})
+_store: Store[CheckIn] = Store(lambda: settings.check_ins_path, CheckIn)
+_from_dict = _store._from_dict
 
 
 def _load() -> list[CheckIn]:
-    path = Path(settings.check_ins_path)
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return [_from_dict(c) for c in data]
-    except Exception:
-        logger.warning("Could not load check_ins file, starting fresh")
-        return []
+    return _store.load_list()
 
 
 def _save(items: list[CheckIn]) -> None:
-    path = Path(settings.check_ins_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps([asdict(c) for c in items], ensure_ascii=False),
-        encoding="utf-8",
-    )
+    _store.save_list(items)
 
 
 def _add_period(dt: datetime, recurrence: str) -> datetime:

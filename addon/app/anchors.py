@@ -1,10 +1,8 @@
-import json
 import time
 import uuid
-from dataclasses import asdict, dataclass, fields
-from pathlib import Path
+from dataclasses import asdict, dataclass
 
-from app.logging_config import logger
+from app._store import Store
 from app.settings import settings
 
 # Weekly recurring "anchors": household-wide schedule items keyed by day-of-week
@@ -31,46 +29,35 @@ class Suppression:
     date: str  # ISO YYYY-MM-DD
 
 
-_ANCHOR_FIELDS = {f.name for f in fields(Anchor)}
-_SUPPRESSION_FIELDS = {f.name for f in fields(Suppression)}
-
-
-def _anchor_from_dict(d: dict) -> Anchor:
-    # Drop unknown keys so a row from a future version can't kill the load.
-    return Anchor(**{k: v for k, v in d.items() if k in _ANCHOR_FIELDS})
-
-
-def _suppression_from_dict(d: dict) -> Suppression:
-    return Suppression(**{k: v for k, v in d.items() if k in _SUPPRESSION_FIELDS})
+# Two dataclasses share one file: instantiate two Stores against the same path
+# so each gets its own _from_dict for unknown-key tolerance. The Suppression
+# store's I/O is unused (only its _from_dict is); _anchor_store owns the file.
+_anchor_store: Store[Anchor] = Store(lambda: settings.anchors_path, Anchor)
+_suppression_store: Store[Suppression] = Store(lambda: settings.anchors_path, Suppression)
+_anchor_from_dict = _anchor_store._from_dict
+_suppression_from_dict = _suppression_store._from_dict
 
 
 def _load() -> dict:
-    path = Path(settings.anchors_path)
-    if not path.exists():
-        return {"anchors": [], "suppressions": []}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return {
-            "anchors": [_anchor_from_dict(a) for a in data.get("anchors", [])],
-            "suppressions": [_suppression_from_dict(s) for s in data.get("suppressions", [])],
-        }
-    except Exception:
-        logger.warning("Could not load anchors file, starting fresh")
-        return {"anchors": [], "suppressions": []}
+    raw = _anchor_store.load_dict()
+    return {
+        "anchors": [
+            _anchor_store._from_dict(a)
+            for a in raw.get("anchors", []) if isinstance(a, dict)
+        ],
+        "suppressions": [
+            _suppression_store._from_dict(s)
+            for s in raw.get("suppressions", []) if isinstance(s, dict)
+        ],
+    }
 
 
 def _save(data: dict) -> None:
-    path = Path(settings.anchors_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            {
-                "anchors": [asdict(a) for a in data["anchors"]],
-                "suppressions": [asdict(s) for s in data["suppressions"]],
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+    _anchor_store.save_dict(
+        {
+            "anchors": [asdict(a) for a in data["anchors"]],
+            "suppressions": [asdict(s) for s in data["suppressions"]],
+        }
     )
 
 

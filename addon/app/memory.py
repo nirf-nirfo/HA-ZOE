@@ -1,10 +1,8 @@
-import json
 import time
 import uuid
-from dataclasses import asdict, dataclass, fields
-from pathlib import Path
+from dataclasses import dataclass
 
-from app.logging_config import logger
+from app._store import Store
 from app.settings import settings
 
 # ZOE's long-term memory: durable facts about the user and household that should
@@ -19,33 +17,16 @@ class Fact:
     added_at: float
 
 
-_FIELDS = {f.name for f in fields(Fact)}
-
-
-def _from_dict(d: dict) -> Fact:
-    # Drop unknown keys so a row from a future version can't kill the load.
-    return Fact(**{k: v for k, v in d.items() if k in _FIELDS})
+_store: Store[Fact] = Store(lambda: settings.memory_path, Fact)
+_from_dict = _store._from_dict
 
 
 def _load() -> list[Fact]:
-    path = Path(settings.memory_path)
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return [_from_dict(f) for f in data]
-    except Exception:
-        logger.warning("Could not load memory file, starting fresh")
-        return []
+    return _store.load_list()
 
 
 def _save(facts: list[Fact]) -> None:
-    path = Path(settings.memory_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps([asdict(f) for f in facts], ensure_ascii=False),
-        encoding="utf-8",
-    )
+    _store.save_list(facts)
 
 
 def remember(text: str) -> Fact | None:

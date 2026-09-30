@@ -1,10 +1,8 @@
-import json
 import time
 import uuid
-from dataclasses import asdict, dataclass, fields
-from pathlib import Path
+from dataclasses import dataclass
 
-from app.logging_config import logger
+from app._store import Store
 from app.settings import settings
 
 # Agenda items are fed in advance for a specific calendar day (not a time-of-day),
@@ -21,33 +19,16 @@ class AgendaItem:
     added_at: float
 
 
-_FIELDS = {f.name for f in fields(AgendaItem)}
-
-
-def _from_dict(d: dict) -> AgendaItem:
-    # Drop unknown keys so a row from a future version can't kill the load.
-    return AgendaItem(**{k: v for k, v in d.items() if k in _FIELDS})
+_store: Store[AgendaItem] = Store(lambda: settings.agenda_path, AgendaItem)
+_from_dict = _store._from_dict
 
 
 def _load() -> list[AgendaItem]:
-    path = Path(settings.agenda_path)
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return [_from_dict(i) for i in data]
-    except Exception:
-        logger.warning("Could not load agenda file, starting fresh")
-        return []
+    return _store.load_list()
 
 
 def _save(items: list[AgendaItem]) -> None:
-    path = Path(settings.agenda_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps([asdict(i) for i in items], ensure_ascii=False),
-        encoding="utf-8",
-    )
+    _store.save_list(items)
 
 
 def add_item(sender: str, date: str, text: str) -> AgendaItem:

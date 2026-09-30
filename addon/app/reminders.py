@@ -1,13 +1,11 @@
 import calendar
-import json
 import time
 import uuid
-from dataclasses import asdict, dataclass, fields, replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from app.logging_config import logger
+from app._store import Store
 from app.settings import settings
 
 _IL_TZ = ZoneInfo("Asia/Jerusalem")
@@ -93,33 +91,16 @@ def normalize_recurring() -> int:
     return changed
 
 
-_FIELDS = {f.name for f in fields(Reminder)}
-
-
-def _from_dict(d: dict) -> Reminder:
-    # Drop unknown keys so a row from a future version can't kill the load.
-    return Reminder(**{k: v for k, v in d.items() if k in _FIELDS})
+_store: Store[Reminder] = Store(lambda: settings.reminders_path, Reminder)
+_from_dict = _store._from_dict
 
 
 def _load() -> list[Reminder]:
-    path = Path(settings.reminders_path)
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return [_from_dict(r) for r in data]
-    except Exception:
-        logger.warning("Could not load reminders file, starting fresh")
-        return []
+    return _store.load_list()
 
 
 def _save(reminders: list[Reminder]) -> None:
-    path = Path(settings.reminders_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps([asdict(r) for r in reminders], ensure_ascii=False),
-        encoding="utf-8",
-    )
+    _store.save_list(reminders)
 
 
 def find_duplicate(

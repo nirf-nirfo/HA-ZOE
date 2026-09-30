@@ -1,10 +1,8 @@
-import json
 import time
 import uuid
-from dataclasses import asdict, dataclass, fields, replace
-from pathlib import Path
+from dataclasses import dataclass, replace
 
-from app.logging_config import logger
+from app._store import Store
 from app.settings import settings
 
 # A monitor periodically checks one device's state until an end time, and alerts
@@ -26,33 +24,16 @@ class Monitor:
     last_state: str | None = None
 
 
-_FIELDS = {f.name for f in fields(Monitor)}
-
-
-def _from_dict(d: dict) -> Monitor:
-    # Drop unknown keys so a row from a future version can't kill the load.
-    return Monitor(**{k: v for k, v in d.items() if k in _FIELDS})
+_store: Store[Monitor] = Store(lambda: settings.monitors_path, Monitor)
+_from_dict = _store._from_dict
 
 
 def _load() -> list[Monitor]:
-    path = Path(settings.monitors_path)
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return [_from_dict(m) for m in data]
-    except Exception:
-        logger.warning("Could not load monitors file, starting fresh")
-        return []
+    return _store.load_list()
 
 
 def _save(monitors: list[Monitor]) -> None:
-    path = Path(settings.monitors_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps([asdict(m) for m in monitors], ensure_ascii=False),
-        encoding="utf-8",
-    )
+    _store.save_list(monitors)
 
 
 def add_monitor(

@@ -1,12 +1,11 @@
 import calendar
-import json
 import time
 import uuid
-from dataclasses import asdict, dataclass, fields, replace
+from dataclasses import dataclass, replace
 from datetime import datetime
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from app._store import Store
 from app.logging_config import logger
 from app.settings import settings
 from app import expenses as expenses_mod
@@ -35,33 +34,16 @@ class RecurringExpense:
     created_at: float
 
 
-_FIELDS = {f.name for f in fields(RecurringExpense)}
-
-
-def _from_dict(d: dict) -> RecurringExpense:
-    # Drop unknown keys so a row from a future version can't kill the load.
-    return RecurringExpense(**{k: v for k, v in d.items() if k in _FIELDS})
+_store: Store[RecurringExpense] = Store(lambda: settings.recurring_expenses_path, RecurringExpense)
+_from_dict = _store._from_dict
 
 
 def _load() -> list[RecurringExpense]:
-    path = Path(settings.recurring_expenses_path)
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return [_from_dict(r) for r in data]
-    except Exception:
-        logger.warning("Could not load recurring_expenses file, starting fresh")
-        return []
+    return _store.load_list()
 
 
 def _save(items: list[RecurringExpense]) -> None:
-    path = Path(settings.recurring_expenses_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps([asdict(r) for r in items], ensure_ascii=False),
-        encoding="utf-8",
-    )
+    _store.save_list(items)
 
 
 def add(
