@@ -1,8 +1,10 @@
 import asyncio
 import base64
+import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 _IL_TZ = ZoneInfo("Asia/Jerusalem")
@@ -26,6 +28,7 @@ from app.claude_agent import (
     SCHEDULED_ACTION_TOOLS,
     get_known_entities,
     initial_context,
+    run_briefing_model,
     run_check_in_model,
     run_model,
 )
@@ -33,7 +36,7 @@ from app.confirmation import make_pending, pop_if_confirmed, store_pending
 from app.ha_client import ha_client
 from app.logging_config import logger
 from app.lists import add_item, clear_list, get_all_list_names, get_list, remove_items
-from app.memory import forget, remember
+from app.memory import all_facts, forget, remember
 from app import (
     agenda, anchors, briefing, check_ins, conversation, conversation_log, expenses,
     holidays, inbound_tracker, monitors, personal_tasks, recurring_expenses, scheduled_actions,
@@ -267,106 +270,247 @@ def _school_note(status: str) -> str:
     return ""
 
 
-async def _compile_morning_briefing(sender: str, dt: datetime) -> str:
+# --- Item 10: gather/render split so briefings can flip between the deterministic
+# Python renderer (default, unchanged output) and a memory-aware LLM composition
+# (behind settings.briefing_model_compose). Data gathering is the shared, pure
+# step; both paths consume the same dict.
+
+# Memory-fact pattern: "המספר <phone> הוא של <name>" (or the loose variant
+# "המספר של <name> הוא <phone>"). Best-effort resolution until Item 13 lands
+# app.senders.resolve() — swap the body here when that PR lands.
+_PHONE_TO_NAME_A = re.compile(r"המספר\s+(\d[\d\s\-+]{4,})\s+הוא\s+של\s+([^\.\n,]+)")
+_PHONE_TO_NAME_B = re.compile(r"המספר\s+של\s+([^\.\n,]+?)\s+הוא\s+(\d[\d\s\-+]{4,})")
+
+
+def _resolve_sender_name(sender: str) -> str | None:
+    """Best-effort: pull a name for `sender` out of memory facts.
+
+    Item 13 will replace this with senders.resolve(sender). Until then we
+    scan the facts for either phrasing and match on a normalized phone.
+    """
+    norm_sender = re.sub(r"\D", "", sender or "")
+    if not norm_sender:
+        return None
+    for f in all_facts():
+        for pattern, phone_group, name_group in (
+            (_PHONE_TO_NAME_A, 1, 2),
+            (_PHONE_TO_NAME_B, 2, 1),
+        ):
+            m = pattern.search(f.text)
+            if not m:
+                continue
+            phone_norm = re.sub(r"\D", "", m.group(phone_group))
+            if phone_norm and (phone_norm == norm_sender or phone_norm.endswith(norm_sender[-9:])
+                               or norm_sender.endswith(phone_norm[-9:])):
+                return m.group(name_group).strip()
+    return None
+
+
+def _memory_facts_texts() -> list[str]:
+    return [f.text for f in all_facts()]
+
+
+def _anchor_dicts(anchor_list) -> list[dict[str, Any]]:
+    return [{"text": a.text, "time": a.time} for a in anchor_list]
+
+
+def _last_month_expense_summary() -> dict[str, Any] | None:
+    """Returns last month's expense summary dict when non-empty, else None.
+
+    Kept identical to the deterministic renderer's contract: on the 1st of
+    the month, if there were expenses last month, include a top-cats block.
+    """
+    s = expenses.summary(period="last_month")
+    if s["count"] == 0:
+        return None
+    return {
+        "start": s["start"],
+        "end": s["end"],
+        "total_ils": s["total"],
+        "count": s["count"],
+        "top_categories": [
+            {"category": cat, "total_ils": amt} for cat, amt in list(s["by_category"].items())[:3]
+        ],
+    }
+
+
+async def _gather_day_data(sender: str, dt: datetime) -> dict[str, Any]:
+    """Assembles the per-date data block used by both morning and evening
+    briefings. Pure aside from disk reads and the holidays fetch — same
+    inputs give the same output at a moment in time."""
     date = dt.strftime("%Y-%m-%d")
     day_key = _day_key(dt)
     anchor_list = sorted(anchors.anchors_for_date(day_key, date), key=lambda a: a.time or "00:00")
     yearly = reminders_mod.yearly_for_date(sender, dt.month, dt.day)
     agenda_items = agenda.items_for_date(sender, date)
     hols = await holidays.holidays_for_date(date)
+    return {
+        "date": date,
+        "hebrew_day": _hebrew_day(dt),
+        "anchors": _anchor_dicts(anchor_list),
+        "yearly_reminders": [{"text": r.text} for r in yearly],
+        "agenda_items": [{"text": i.text} for i in agenda_items],
+        "holidays": [{"title": h["title"], "school_status": h["school_status"]} for h in hols],
+    }
+
+
+async def _gather_morning_data(sender: str, dt: datetime) -> dict[str, Any]:
+    """Full data blob for a morning brief: today's per-date data + household
+    tasks + this sender's personal tasks + memory facts + optional 1st-of-
+    month last-month expense summary."""
+    day = await _gather_day_data(sender, dt)
+    household_open = get_list("tasks")
+    my_tasks = personal_tasks.list_for(sender)
+    data: dict[str, Any] = {
+        **day,
+        "sender_name": _resolve_sender_name(sender),
+        "household_tasks": [{"text": t.text} for t in household_open],
+        "personal_tasks": [{"text": t.text} for t in my_tasks],
+        "memory_facts": _memory_facts_texts(),
+    }
+    if dt.day == 1:
+        last = _last_month_expense_summary()
+        if last is not None:
+            data["last_month_summary"] = last
+    return data
+
+
+async def _gather_evening_data(sender: str, today: datetime, tomorrow: datetime) -> dict[str, Any]:
+    """Full data blob for an evening brief: today's + tomorrow's per-date
+    data, today's household spend, memory facts, sender name."""
+    today_day = await _gather_day_data(sender, today)
+    tomorrow_day = await _gather_day_data(sender, tomorrow)
+    spent = expenses.summary(period="today")
+    return {
+        **today_day,
+        "sender_name": _resolve_sender_name(sender),
+        "todays_expenses": {"count": spent["count"], "total_ils": spent["total"]},
+        "tomorrow": tomorrow_day,
+        "memory_facts": _memory_facts_texts(),
+    }
+
+
+def _render_morning_deterministic(data: dict[str, Any]) -> str:
+    """Byte-identical to the pre-Item-10 morning brief — only source of the
+    text is this function when the compose flag is off, so any diff here is
+    a real behavior change and must be intentional."""
+    hebrew_day = data["hebrew_day"]
+    anchor_list = data.get("anchors") or []
+    yearly = data.get("yearly_reminders") or []
+    agenda_items = data.get("agenda_items") or []
+    hols = data.get("holidays") or []
 
     if not (anchor_list or yearly or agenda_items or hols):
-        return f"☀️ בוקר טוב! ל{_hebrew_day(dt)} אין כלום ביומן."
+        return f"☀️ בוקר טוב! ל{hebrew_day} אין כלום ביומן."
 
-    parts = [f"☀️ בוקר טוב! סדר יום ל{_hebrew_day(dt)}:"]
+    parts = [f"☀️ בוקר טוב! סדר יום ל{hebrew_day}:"]
 
     if anchor_list:
         lines = []
         for a in anchor_list:
-            prefix = f"{a.time} — " if a.time else ""
-            lines.append(f"• {prefix}{a.text}")
+            prefix = f"{a['time']} — " if a.get("time") else ""
+            lines.append(f"• {prefix}{a['text']}")
         parts.append("⚓ עוגנים:\n" + "\n".join(lines))
 
     if yearly:
-        parts.append("🎂 קבועות:\n" + "\n".join(f"• {r.text}" for r in yearly))
+        parts.append("🎂 קבועות:\n" + "\n".join(f"• {r['text']}" for r in yearly))
 
     if hols:
         lines = [f"• {h['title']}{_school_note(h['school_status'])}" for h in hols]
         parts.append("🕎 חגים:\n" + "\n".join(lines))
 
     if agenda_items:
-        parts.append("📌 היום:\n" + "\n".join(f"• {i.text}" for i in agenda_items))
+        parts.append("📌 היום:\n" + "\n".join(f"• {i['text']}" for i in agenda_items))
 
-    household_open = get_list("tasks")
+    household_open = data.get("household_tasks") or []
     if household_open:
-        lines = [f"• {item.text}" for item in household_open[:8]]
+        lines = [f"• {item['text']}" for item in household_open[:8]]
         more = f"\n… ועוד {len(household_open) - 8}" if len(household_open) > 8 else ""
         parts.append("📝 משימות בית פתוחות:\n" + "\n".join(lines) + more)
 
-    my_tasks = personal_tasks.list_for(sender)
+    my_tasks = data.get("personal_tasks") or []
     if my_tasks:
-        lines = [f"• {t.text}" for t in my_tasks[:8]]
+        lines = [f"• {t['text']}" for t in my_tasks[:8]]
         more = f"\n… ועוד {len(my_tasks) - 8}" if len(my_tasks) > 8 else ""
         parts.append("📌 משימות שלי:\n" + "\n".join(lines) + more)
 
-    # On the 1st of the month, tack on last month's expense summary.
-    if dt.day == 1:
-        s = expenses.summary(period="last_month")
-        if s["count"] > 0:
-            lines = [f"💰 סיכום החודש הקודם ({s['start']} → {s['end']}):",
-                     f"סה״כ {_fmt_ils(s['total'])} ({s['count']} הוצאות)"]
-            top_cats = list(s["by_category"].items())[:3]
-            if top_cats:
-                lines.append("קטגוריות מובילות:")
-                for cat, amt in top_cats:
-                    lines.append(f"  • {cat}: {_fmt_ils(amt)}")
-            parts.append("\n".join(lines))
+    last = data.get("last_month_summary")
+    if last:
+        lines = [
+            f"💰 סיכום החודש הקודם ({last['start']} → {last['end']}):",
+            f"סה״כ {_fmt_ils(last['total_ils'])} ({last['count']} הוצאות)",
+        ]
+        top_cats = last.get("top_categories") or []
+        if top_cats:
+            lines.append("קטגוריות מובילות:")
+            for c in top_cats:
+                lines.append(f"  • {c['category']}: {_fmt_ils(c['total_ils'])}")
+        parts.append("\n".join(lines))
 
     return "\n\n".join(parts)
 
 
-def _one_line_items(anchor_list, yearly, agenda_items, hols) -> str:
+def _one_line_items_from_dicts(day_data: dict[str, Any]) -> str:
     bits = []
-    for a in anchor_list:
-        bits.append(f"{a.text} ב-{a.time}" if a.time else a.text)
-    for r in yearly:
-        bits.append(r.text)
-    for i in agenda_items:
-        bits.append(i.text)
-    for h in hols:
+    for a in day_data.get("anchors") or []:
+        bits.append(f"{a['text']} ב-{a['time']}" if a.get("time") else a["text"])
+    for r in day_data.get("yearly_reminders") or []:
+        bits.append(r["text"])
+    for i in day_data.get("agenda_items") or []:
+        bits.append(i["text"])
+    for h in day_data.get("holidays") or []:
         bits.append(f"{h['title']}{_school_note(h['school_status'])}")
     return ", ".join(bits) if bits else ""
 
 
-async def _compile_evening_briefing(sender: str, today: datetime, tomorrow: datetime) -> str:
-    today_str = today.strftime("%Y-%m-%d")
-    tomorrow_str = tomorrow.strftime("%Y-%m-%d")
-
-    today_anchors = sorted(anchors.anchors_for_date(_day_key(today), today_str), key=lambda a: a.time or "00:00")
-    today_yearly = reminders_mod.yearly_for_date(sender, today.month, today.day)
-    today_agenda = agenda.items_for_date(sender, today_str)
-    today_hols = await holidays.holidays_for_date(today_str)
-
-    tomorrow_anchors = sorted(anchors.anchors_for_date(_day_key(tomorrow), tomorrow_str), key=lambda a: a.time or "00:00")
-    tomorrow_yearly = reminders_mod.yearly_for_date(sender, tomorrow.month, tomorrow.day)
-    tomorrow_agenda = agenda.items_for_date(sender, tomorrow_str)
-    tomorrow_hols = await holidays.holidays_for_date(tomorrow_str)
-
-    today_summary = _one_line_items(today_anchors, today_yearly, today_agenda, today_hols)
-    tomorrow_summary = _one_line_items(tomorrow_anchors, tomorrow_yearly, tomorrow_agenda, tomorrow_hols)
+def _render_evening_deterministic(data: dict[str, Any]) -> str:
+    """Byte-identical to the pre-Item-10 evening brief."""
+    today_summary = _one_line_items_from_dicts(data)
+    tomorrow = data.get("tomorrow") or {}
+    tomorrow_summary = _one_line_items_from_dicts(tomorrow)
 
     lines = ["🌙 ערב טוב!"]
     if today_summary:
         lines.append(f"היום היה: {today_summary}")
-    # Household-wide spend for today (all senders, all sources — including auto-inserted recurring).
-    spent = expenses.summary(period="today")
-    if spent["count"] > 0:
-        lines.append(f"💰 הוצאות היום: {spent['count']} · סה״כ {_fmt_ils(spent['total'])}")
+    spent = data.get("todays_expenses") or {"count": 0, "total_ils": 0}
+    if spent.get("count", 0) > 0:
+        lines.append(f"💰 הוצאות היום: {spent['count']} · סה״כ {_fmt_ils(spent['total_ils'])}")
     if tomorrow_summary:
-        lines.append(f"מחר ({_hebrew_day(tomorrow)}): {tomorrow_summary}")
+        lines.append(f"מחר ({tomorrow.get('hebrew_day', '')}): {tomorrow_summary}")
     else:
-        lines.append(f"מחר ({_hebrew_day(tomorrow)}) נקי — אין כלום ביומן.")
+        lines.append(f"מחר ({tomorrow.get('hebrew_day', '')}) נקי — אין כלום ביומן.")
     return "\n".join(lines)
+
+
+async def _compile_morning_briefing(sender: str, dt: datetime) -> str:
+    """Dispatcher. Gathers the data blob, then either hands it to
+    run_briefing_model (memory-aware LLM compose) or falls back to the
+    deterministic renderer. Flag off = identical output to pre-Item-10.
+    A model exception, timeout, or empty reply falls back too, so a bad
+    Anthropic call can never hold up the daily brief loop."""
+    data = await _gather_morning_data(sender, dt)
+    if settings.briefing_model_compose:
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(run_briefing_model, "morning", data),
+                timeout=15,
+            )
+        except Exception:
+            logger.exception("Morning briefing model compose failed; falling back to deterministic")
+    return _render_morning_deterministic(data)
+
+
+async def _compile_evening_briefing(sender: str, today: datetime, tomorrow: datetime) -> str:
+    data = await _gather_evening_data(sender, today, tomorrow)
+    if settings.briefing_model_compose:
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(run_briefing_model, "evening", data),
+                timeout=15,
+            )
+        except Exception:
+            logger.exception("Evening briefing model compose failed; falling back to deterministic")
+    return _render_evening_deterministic(data)
 
 
 async def _daily_briefing_loop() -> None:

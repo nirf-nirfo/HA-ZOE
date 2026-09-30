@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     # Default off; user opts in via the add-on option and Item 17 validates before we
     # flip the shipped default.
     model_routing_hybrid: bool = False
+    # Item 10: when true, morning/evening briefings are composed by a Sonnet call
+    # over the gathered data blob so memory facts (e.g. "no school during chol
+    # hamoed") actually affect the output. Default off — deterministic renderer
+    # is the safe fallback and stays wired up for exceptions/timeouts.
+    briefing_model_compose: bool = False
 
 
 settings = Settings()
