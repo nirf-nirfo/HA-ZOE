@@ -7,3 +7,5 @@ venv/
 
 # never commit recovery codes / secrets
 *recovery-codes*
+
+.claude/
