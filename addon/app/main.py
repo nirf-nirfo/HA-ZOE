@@ -37,6 +37,7 @@ from app.memory import forget, remember
 from app import (
     agenda, anchors, briefing, check_ins, conversation, conversation_log, expenses,
     holidays, inbound_tracker, monitors, personal_tasks, recurring_expenses, scheduled_actions,
+    senders,
 )
 from app import reminders as reminders_mod
 from app.reminders import (
@@ -185,6 +186,7 @@ async def admin_status() -> dict:
         sender: {
             "last_inbound_hours_ago": round((now - e.last_inbound_at) / 3600, 2),
             "warned_23h": e.warned_23h,
+            "name": senders.resolve(sender),
         }
         for sender, e in entries.items()
     }
@@ -615,7 +617,7 @@ async def _meta_window_loop() -> None:
                 if entry.warned_23h:
                     continue
                 if warn_lo <= elapsed < warn_hi:
-                    logger.info("Meta-window loop: warning %s at %.1fh", sender, elapsed / 3600)
+                    logger.info("Meta-window loop: warning %s (%s) at %.1fh", sender, senders.resolve(sender), elapsed / 3600)
                     await send_message(sender, _META_WINDOW_WARNING)
                     inbound_tracker.mark_warned(sender)
             except Exception:
@@ -1259,7 +1261,7 @@ def _handle_expense_call(sender: str, tool: str, inp: dict) -> str:
             return "אין הוצאות רשומות."
         lines = []
         for e in recent:
-            who = "" if sender_filter else f" · {e.sender}"
+            who = "" if sender_filter else f" · {senders.resolve(e.sender)}"
             pay = f" · {e.payment_method}" if e.payment_method != "לא צוין" else ""
             desc = f" — {e.description}" if e.description else ""
             lines.append(f"• [{e.id}] {e.date} · {_fmt_ils(e.amount)} · {e.category}{pay}{who}{desc}")
@@ -1286,7 +1288,7 @@ def _handle_expense_call(sender: str, tool: str, inp: dict) -> str:
             "לפי מדווח:",
         ]
         for phone, amt in s["by_sender"].items():
-            lines.append(f"  • {phone}: {_fmt_ils(amt)}")
+            lines.append(f"  • {senders.resolve(phone)}: {_fmt_ils(amt)}")
         lines.append("")
         lines.append("לפי קטגוריה:")
         for cat, amt in s["by_category"].items():
