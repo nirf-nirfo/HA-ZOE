@@ -392,3 +392,7 @@ Never bump/deploy mid-phase.
 | 15 | 2026-09-30 | (merged) | Ultra review: no critical/high findings; M1 + M2 fixed in follow-up |
 | 16 | 2026-09-29 | `be752e1` | Meta 24h warning at ~23h (rebase-fixed mid-flight) |
 | 17 | 2026-09-30 | `2f86b99` | Prompt restructure into precedence-ranked sections; 24-scenario harness |
+| 18 | — | — | queued (voice: immediate ack + OpenAI Whisper API) |
+| 19 | — | — | queued (email foundation: pluggable backend + IMAP + tools) |
+| 20 | — | — | queued (email intelligence: receipt auto-extract, iCal auto-extract) |
+| 21 | — | — | queued (email watch loop, hourly with per-watch override) |
