@@ -380,7 +380,7 @@ Never bump/deploy mid-phase.
 | 03 | 2026-09-30 | `a4341cf` | 168 tests across 14 stores + recurrence + regressions; all pass on CI |
 | 04 | 2026-09-29 | `601e374` | Hybrid routing flag `model_routing_hybrid` (default OFF) |
 | 05 | 2026-09-30 | `81103e5` | Generic `Store[T]` base; all 15 stores migrated; -12 LOC net |
-| 06 | — | — | in flight (split main.py; last in Phase A) |
+| 06 | 2026-09-30 | (merged) | Split main.py: 1818→188 lines; new handlers/, loops.py, agent_loop.py, briefing_compile.py, status.py |
 | 07 | 2026-09-30 | `7ce7baf` | `/health` + `/admin/status` LAN-only; loop heartbeats |
 | 08 | 2026-09-30 | `0b148c3` | GH Actions runs pytest on PR; **168/168 passing** |
 | 09 | 2026-09-29 | `5c63c8a` | Root `CLAUDE.md` for future sessions |
@@ -389,6 +389,6 @@ Never bump/deploy mid-phase.
 | 12 | 2026-09-30 | `3314777` | Check-in continuity: prior ping + user reply feed into next tick |
 | 13 | 2026-09-30 | `790cc40` | Phone → name resolver from memory facts; used in summaries/logs |
 | 14 | 2026-09-29 | `9097b67` | Bulk `GET /api/states`; ~2s → ~150ms per message |
-| 15 | — | — | bonus (ultra review, last) |
+| 15 | — | — | in flight (bonus ultra review) |
 | 16 | 2026-09-29 | `be752e1` | Meta 24h warning at ~23h (rebase-fixed mid-flight) |
 | 17 | 2026-09-30 | `2f86b99` | Prompt restructure into precedence-ranked sections; 24-scenario harness |
