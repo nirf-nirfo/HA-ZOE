@@ -30,6 +30,12 @@ class CheckIn:
     # hour on my progress" work-session polling; sub-daily cadences that daily/weekly
     # can't express).
     interval_minutes: int | None = None
+    # Continuity across ticks: the text of the previous fire and its timestamp.
+    # Used by `_run_check_in` to feed prior-turn context into the model so an
+    # hourly ping can reference what it asked last time and how the user replied.
+    # Older stored rows load with these as None via `_from_dict`'s unknown-key filtering.
+    last_fired_at: float | None = None
+    last_fired_text: str | None = None
 
 
 _store: Store[CheckIn] = Store(lambda: settings.check_ins_path, CheckIn)
@@ -138,6 +144,25 @@ def next_fire_at() -> float | None:
     now = time.time()
     times = [c.next_at for c in _load() if c.next_at > now]
     return min(times) if times else None
+
+
+def record_fire(check_in_id: str, text: str) -> None:
+    """Records that check-in `check_in_id` just fired with `text`. Updates the
+    row's `last_fired_at` / `last_fired_text` in place so the next tick can
+    reference the previous ping. One-shot check-ins are removed by `pop_due`
+    and simply won't be found here — idempotent no-op in that case."""
+    items = _load()
+    changed = False
+    now = time.time()
+    updated: list[CheckIn] = []
+    for c in items:
+        if c.id == check_in_id:
+            updated.append(replace(c, last_fired_at=now, last_fired_text=text))
+            changed = True
+        else:
+            updated.append(c)
+    if changed:
+        _save(updated)
 
 
 def pop_due() -> list[CheckIn]:
