@@ -50,27 +50,31 @@ def _save(items: list[CheckIn]) -> None:
     _store.save_list(items)
 
 
-def _add_period(dt: datetime, recurrence: str) -> datetime:
+def _add_period(dt: datetime, recurrence: str, anchor_day: int | None = None) -> datetime:
     if recurrence == "daily":
         return dt + timedelta(days=1)
     if recurrence == "weekly":
         return dt + timedelta(weeks=1)
+    # anchor_day preserves the original day of month so a monthly on day 31
+    # doesn't permanently drift down after being clamped through February.
+    target_day = anchor_day if anchor_day else dt.day
     if recurrence == "monthly":
         month = dt.month % 12 + 1
         year = dt.year + (1 if dt.month == 12 else 0)
-        day = min(dt.day, calendar.monthrange(year, month)[1])
+        day = min(target_day, calendar.monthrange(year, month)[1])
         return dt.replace(year=year, month=month, day=day)
     if recurrence == "yearly":
         year = dt.year + 1
-        day = min(dt.day, calendar.monthrange(year, dt.month)[1])
+        day = min(target_day, calendar.monthrange(year, dt.month)[1])
         return dt.replace(year=year, day=day)
     return dt
 
 
 def _next_occurrence(next_at: float, recurrence: str, now: float) -> float:
     dt = datetime.fromtimestamp(next_at, _IL_TZ).replace(tzinfo=None)
+    anchor_day = dt.day
     while True:
-        dt = _add_period(dt, recurrence)
+        dt = _add_period(dt, recurrence, anchor_day)
         ts = dt.replace(tzinfo=_IL_TZ).timestamp()
         if ts > now:
             return ts

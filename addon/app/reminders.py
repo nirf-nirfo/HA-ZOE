@@ -24,21 +24,27 @@ class Reminder:
     recurrence: str | None = None  # None | daily | weekly | monthly | yearly
 
 
-def _add_period(dt: datetime, recurrence: str) -> datetime:
+def _add_period(dt: datetime, recurrence: str, anchor_day: int | None = None) -> datetime:
     """Advances a naive local datetime by one recurrence period, keeping the
-    wall-clock time stable across DST and clamping to the end of short months."""
+    wall-clock time stable across DST and clamping to the end of short months.
+
+    `anchor_day` is the original scheduled day of month (from the reminder's first
+    fire); when set, clamping uses it — so a monthly reminder on the 31st clamps
+    to Feb 28/29 but comes back to 31 in March, instead of drifting downward
+    permanently."""
     if recurrence == "daily":
         return dt + timedelta(days=1)
     if recurrence == "weekly":
         return dt + timedelta(weeks=1)
+    target_day = anchor_day if anchor_day else dt.day
     if recurrence == "monthly":
         month = dt.month % 12 + 1
         year = dt.year + (1 if dt.month == 12 else 0)
-        day = min(dt.day, calendar.monthrange(year, month)[1])
+        day = min(target_day, calendar.monthrange(year, month)[1])
         return dt.replace(year=year, month=month, day=day)
     if recurrence == "yearly":
         year = dt.year + 1
-        day = min(dt.day, calendar.monthrange(year, dt.month)[1])
+        day = min(target_day, calendar.monthrange(year, dt.month)[1])
         return dt.replace(year=year, day=day)
     return dt
 
@@ -49,8 +55,9 @@ def _next_occurrence(send_at: float, recurrence: str, now: float) -> float:
     if recurrence not in RECURRENCES:
         raise ValueError(f"invalid recurrence: {recurrence!r}")
     dt = datetime.fromtimestamp(send_at, _IL_TZ).replace(tzinfo=None)
+    anchor_day = dt.day  # preserve original day so 31st doesn't drift after February
     while True:
-        dt = _add_period(dt, recurrence)
+        dt = _add_period(dt, recurrence, anchor_day)
         ts = dt.replace(tzinfo=_IL_TZ).timestamp()
         if ts > now:
             return ts

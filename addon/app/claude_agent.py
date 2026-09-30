@@ -133,7 +133,10 @@ EXPENSE_TOOLS = {
 # Tools whose successful use should broadcast the reply to all household senders,
 # not just the one who sent the request. Everything else stays private to the sender.
 BROADCAST_TOOLS = {
-    _ADD_EXPENSE, _DELETE_LAST_EXPENSE, _FIX_LAST_EXPENSE, _EXPENSE_SUMMARY,
+    # Mutations only. Read-only queries (expense_summary, list_recent_expenses)
+    # stay private to the sender — asking "how much did we spend?" shouldn't
+    # ping the spouse's WhatsApp every time.
+    _ADD_EXPENSE, _DELETE_LAST_EXPENSE, _FIX_LAST_EXPENSE,
     _ADD_RECURRING_EXPENSE, _REMOVE_RECURRING_EXPENSE,
 }
 

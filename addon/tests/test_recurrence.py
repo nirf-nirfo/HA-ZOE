@@ -191,3 +191,37 @@ def test_due_today_short_month_clamp_feb_leap():
     r = _rx(31, "monthly")
     assert recurring_expenses._due_today(r, datetime(2024, 2, 29)) is True
     assert recurring_expenses._due_today(r, datetime(2024, 2, 28)) is False
+
+
+# ---------- M1 regression: monthly day-31 doesn't drift down after Feb --------
+
+
+def test_monthly_day_31_does_not_drift_after_short_month():
+    """Regression for review finding M1: a monthly reminder on day 31 clamps
+    to Feb 28 (or 29 in a leap year) but must return to 31 in March and every
+    other 31-day month, not stay stuck at 28."""
+    # Anchor on Jan 31 2027 (chosen to be a specific known date past DST boundary).
+    jan_31 = datetime(2027, 1, 31, 9, 0, tzinfo=_IL_TZ).timestamp()
+    # First step: Jan 31 -> Feb 28.
+    feb = datetime.fromtimestamp(
+        reminders._next_occurrence(jan_31, "monthly", jan_31 + 1),
+        _IL_TZ,
+    )
+    assert (feb.month, feb.day) == (2, 28)
+    # From Feb 28 a naive impl would keep clamping downward. Ours must recover
+    # to 31 because we track the original anchor day.
+    mar = datetime.fromtimestamp(
+        reminders._next_occurrence(jan_31, "monthly", feb.timestamp() + 1),
+        _IL_TZ,
+    )
+    assert (mar.month, mar.day) == (3, 31)
+    apr = datetime.fromtimestamp(
+        reminders._next_occurrence(jan_31, "monthly", mar.timestamp() + 1),
+        _IL_TZ,
+    )
+    assert (apr.month, apr.day) == (4, 30)
+    may = datetime.fromtimestamp(
+        reminders._next_occurrence(jan_31, "monthly", apr.timestamp() + 1),
+        _IL_TZ,
+    )
+    assert (may.month, may.day) == (5, 31)
