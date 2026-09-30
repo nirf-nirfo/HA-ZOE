@@ -379,16 +379,16 @@ Never bump/deploy mid-phase.
 | 02 | 2026-09-29 | `c63abf0` | Prompt caching (system + tools); byte-identical restructure |
 | 03 | 2026-09-30 | `a4341cf` | 168 tests across 14 stores + recurrence + regressions; all pass on CI |
 | 04 | 2026-09-29 | `601e374` | Hybrid routing flag `model_routing_hybrid` (default OFF) |
-| 05 | — | — | in flight (generic Store base) |
-| 06 | — | — | queued (split main.py; last in Phase A) |
+| 05 | 2026-09-30 | `81103e5` | Generic `Store[T]` base; all 15 stores migrated; -12 LOC net |
+| 06 | — | — | in flight (split main.py; last in Phase A) |
 | 07 | 2026-09-30 | `7ce7baf` | `/health` + `/admin/status` LAN-only; loop heartbeats |
 | 08 | 2026-09-30 | `0b148c3` | GH Actions runs pytest on PR; **168/168 passing** |
 | 09 | 2026-09-29 | `5c63c8a` | Root `CLAUDE.md` for future sessions |
-| 10 | — | — | queued (memory-aware briefings via LLM compose) |
-| 11 | — | — | queued (anchor tagging + school-off suppression) |
-| 12 | — | — | queued (check-in continuity across ticks) |
-| 13 | — | — | queued (cross-store name resolution) |
+| 10 | 2026-09-30 | `925ae84` | LLM-composed briefings behind `briefing_model_compose` flag (default OFF) |
+| 11 | 2026-09-30 | `b08ae0c` | Anchor `tags` field + `school` filter on Jewish-holiday school-off days |
+| 12 | 2026-09-30 | `3314777` | Check-in continuity: prior ping + user reply feed into next tick |
+| 13 | 2026-09-30 | `790cc40` | Phone → name resolver from memory facts; used in summaries/logs |
 | 14 | 2026-09-29 | `9097b67` | Bulk `GET /api/states`; ~2s → ~150ms per message |
 | 15 | — | — | bonus (ultra review, last) |
 | 16 | 2026-09-29 | `be752e1` | Meta 24h warning at ~23h (rebase-fixed mid-flight) |
-| 17 | — | — | in flight (prompt audit + behavior harness) |
+| 17 | 2026-09-30 | `2f86b99` | Prompt restructure into precedence-ranked sections; 24-scenario harness |
