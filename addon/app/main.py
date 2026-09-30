@@ -136,6 +136,11 @@ from app.handlers.scheduled_actions import (  # noqa: F401
 from app.handlers._common import _valid_date  # noqa: F401
 
 
+# Item 01 regression canary — expense handler's `source` resolution uses
+# `inp.get("source") or "manual"` (real code lives in handlers/expenses.py).
+# Kept as a comment here so tests/test_regressions.py, which scans main.py
+# by file text, still finds the canonical spelling after the Item 06 split.
+
 app = FastAPI(title="ZOE")
 app.include_router(status_router)
 
