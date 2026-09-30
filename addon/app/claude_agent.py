@@ -1,3 +1,4 @@
+import json
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -1296,3 +1297,61 @@ def run_check_in_model(messages: list[dict[str, Any]]) -> Any:
     )
     _log_usage("run_check_in_model", CHECK_IN_MODEL, getattr(resp, "usage", None))
     return resp
+
+
+# Item 10: LLM-composed briefings. The deterministic renderer stays intact; when
+# settings.briefing_model_compose is on, main.py hands the gathered data blob to
+# this function instead so memory facts (e.g. "no school during chol hamoed") can
+# actually shape the output. Model is fixed to Sonnet 5 — briefings are text
+# composition and don't benefit from Opus reasoning; caps cost at ~$0.01/brief
+# so 4 briefs/day is ~$1.20/month. No tools, no cache_control (setup cost isn't
+# worth it for a one-shot small request).
+_BRIEFING_SYSTEM = (
+    "You are ZOE composing a WhatsApp brief for one household member.\n"
+    "Compose ONE clear Hebrew message. Apply memory facts naturally (e.g. \"no school\n"
+    "during chol hamoed\" -> omit school hours on those days). Do NOT invent items not\n"
+    "in the data. Keep it scannable, no more than ~10 lines.\n"
+    "\n"
+    "Structure:\n"
+    "- MORNING: greeting + today's items grouped by section (anchors, birthdays,\n"
+    "  holidays, tasks) sorted by time when a time is given\n"
+    "- EVENING: short today recap (one line) + tomorrow preview (few lines) +\n"
+    "  spending summary if non-zero\n"
+    "\n"
+    "Reply with the message text ONLY. No prefix, no meta commentary."
+)
+
+
+def run_briefing_model(kind: str, data: dict[str, Any]) -> str:
+    """Composes a morning ('morning') or evening ('evening') brief message from
+    a structured data blob. Returns the final Hebrew text.
+
+    kind: 'morning' or 'evening'. Included in the user turn so the model knows
+    which structure to produce.
+
+    Runs synchronously against the Anthropic SDK; main.py wraps the call in
+    asyncio.to_thread + asyncio.wait_for(15s) so the daily briefing loop stays
+    async and can't hang on a slow API response.
+    """
+    if kind not in ("morning", "evening"):
+        raise ValueError(f"kind must be 'morning' or 'evening', got {kind!r}")
+    user_text = (
+        f"Compose the {kind.upper()} brief from this data. "
+        f"Reply with only the Hebrew message text.\n\n"
+        f"DATA:\n{json.dumps(data, ensure_ascii=False, indent=2)}"
+    )
+    resp = _client.messages.create(
+        model=INTERACTIVE_MODEL_HYBRID,
+        max_tokens=MAX_TOKENS,
+        system=_BRIEFING_SYSTEM,
+        messages=[{"role": "user", "content": user_text}],
+    )
+    _log_usage("run_briefing_model", INTERACTIVE_MODEL_HYBRID, getattr(resp, "usage", None))
+    parts: list[str] = []
+    for block in getattr(resp, "content", []) or []:
+        if getattr(block, "type", None) == "text":
+            parts.append(getattr(block, "text", "") or "")
+    text = "".join(parts).strip()
+    if not text:
+        raise RuntimeError("run_briefing_model: model returned no text content")
+    return text
