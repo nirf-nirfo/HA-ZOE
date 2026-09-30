@@ -38,6 +38,8 @@ def remember(text: str) -> Fact | None:
     fact = Fact(id=str(uuid.uuid4())[:6], text=text, added_at=time.time())
     facts.append(fact)
     _save(facts)
+    from app import senders  # lazy to avoid circular import
+    senders.refresh()
     return fact
 
 
@@ -53,6 +55,8 @@ def forget(text: str) -> list[str]:
             kept.append(f)
     if removed:
         _save(kept)
+        from app import senders  # lazy to avoid circular import
+        senders.refresh()
     return removed
 
 
