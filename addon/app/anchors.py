@@ -1,6 +1,6 @@
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 from app._store import Store
 from app.settings import settings
@@ -21,6 +21,17 @@ class Anchor:
     text: str
     time: str | None  # "HH:MM" (24-hour, Israel time) or None
     added_at: float
+    # Free-form category tags (e.g. ["school"]). Enables briefing-time filters
+    # like "suppress school anchors on days the school is closed" without the
+    # anchor's free-text needing to be re-parsed. Empty on legacy rows.
+    tags: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # Belt-and-suspenders: a persisted `null` for tags (from a hand-edited
+        # file or an older writer) would otherwise slip through Store's
+        # unknown-key filter as-is and break `"school" in a.tags` later.
+        if self.tags is None:
+            self.tags = []
 
 
 @dataclass
@@ -61,7 +72,12 @@ def _save(data: dict) -> None:
     )
 
 
-def add_anchor(day: str, text: str, time_hhmm: str | None) -> Anchor:
+def add_anchor(
+    day: str,
+    text: str,
+    time_hhmm: str | None,
+    tags: list[str] | None = None,
+) -> Anchor:
     data = _load()
     a = Anchor(
         id=str(uuid.uuid4())[:6],
@@ -69,6 +85,7 @@ def add_anchor(day: str, text: str, time_hhmm: str | None) -> Anchor:
         text=text,
         time=time_hhmm,
         added_at=time.time(),
+        tags=list(tags) if tags else [],
     )
     data["anchors"].append(a)
     _save(data)
@@ -116,6 +133,34 @@ def anchors_for_date(day: str, date: str) -> list[Anchor]:
     data = _load()
     supp_ids = {s.anchor_id for s in data["suppressions"] if s.date == date}
     return [a for a in data["anchors"] if a.day == day.lower() and a.id not in supp_ids]
+
+
+# Heuristic markers for a school-related anchor. Anything Hebrew or English
+# that unambiguously points at "kid finishes school / school pickup / class"
+# without dragging in unrelated חוגים. Kept narrow on purpose — the tool
+# schema is the primary path; this is a one-time back-fill.
+_SCHOOL_MARKERS = ("בית ספר", "מסיימת", "כיתה", "school")
+
+
+def auto_tag_school() -> int:
+    """One-shot migration: add the 'school' tag to anchors whose free text
+    is clearly school-related. Idempotent — anchors already tagged 'school'
+    are left alone. Returns how many rows were updated."""
+    data = _load()
+    updated = 0
+    for a in data["anchors"]:
+        if "school" in a.tags:
+            continue
+        text_l = (a.text or "").lower()
+        # Hebrew comparison stays case-sensitive (no case in Hebrew); English
+        # goes through the lowercased needle.
+        if any(m in a.text for m in _SCHOOL_MARKERS if not m.isascii()) or \
+           any(m in text_l for m in _SCHOOL_MARKERS if m.isascii()):
+            a.tags = list(a.tags) + ["school"]
+            updated += 1
+    if updated:
+        _save(data)
+    return updated
 
 
 def purge_suppressions_before(cutoff_date: str) -> int:

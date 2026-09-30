@@ -241,6 +241,9 @@ async def startup() -> None:
     fixed = normalize_recurring()
     if fixed:
         logger.info("Self-healed %d yearly reminder(s) to their correct next occurrence", fixed)
+    tagged = anchors.auto_tag_school()
+    if tagged:
+        logger.info("Auto-tagged %d anchor(s) as 'school' from text heuristics", tagged)
     asyncio.create_task(_reminder_loop())
     asyncio.create_task(_monitor_loop())
     asyncio.create_task(_scheduled_action_loop())
@@ -337,14 +340,28 @@ def _last_month_expense_summary() -> dict[str, Any] | None:
 async def _gather_day_data(sender: str, dt: datetime) -> dict[str, Any]:
     """Assembles the per-date data block used by both morning and evening
     briefings. Pure aside from disk reads and the holidays fetch — same
-    inputs give the same output at a moment in time."""
+    inputs give the same output at a moment in time.
+
+    School-off suppression: if any holiday for this date has
+    school_status == "off", anchors tagged "school" are dropped from the
+    output and a school_off_note is added so both the deterministic
+    renderer and the LLM compose path can surface the reason."""
     date = dt.strftime("%Y-%m-%d")
     day_key = _day_key(dt)
     anchor_list = sorted(anchors.anchors_for_date(day_key, date), key=lambda a: a.time or "00:00")
     yearly = reminders_mod.yearly_for_date(sender, dt.month, dt.day)
     agenda_items = agenda.items_for_date(sender, date)
     hols = await holidays.holidays_for_date(date)
-    return {
+
+    school_off_holiday = next((h for h in hols if h.get("school_status") == "off"), None)
+    school_off_note: str | None = None
+    if school_off_holiday is not None:
+        before = len(anchor_list)
+        anchor_list = [a for a in anchor_list if "school" not in (a.tags or [])]
+        if before != len(anchor_list):
+            school_off_note = f"🎒 {school_off_holiday['title']} — אין בית ספר היום"
+
+    data: dict[str, Any] = {
         "date": date,
         "hebrew_day": _hebrew_day(dt),
         "anchors": _anchor_dicts(anchor_list),
@@ -352,6 +369,9 @@ async def _gather_day_data(sender: str, dt: datetime) -> dict[str, Any]:
         "agenda_items": [{"text": i.text} for i in agenda_items],
         "holidays": [{"title": h["title"], "school_status": h["school_status"]} for h in hols],
     }
+    if school_off_note:
+        data["school_off_note"] = school_off_note
+    return data
 
 
 async def _gather_morning_data(sender: str, dt: datetime) -> dict[str, Any]:
@@ -404,6 +424,10 @@ def _render_morning_deterministic(data: dict[str, Any]) -> str:
         return f"☀️ בוקר טוב! ל{hebrew_day} אין כלום ביומן."
 
     parts = [f"☀️ בוקר טוב! סדר יום ל{hebrew_day}:"]
+
+    school_off_note = data.get("school_off_note")
+    if school_off_note:
+        parts.append(school_off_note)
 
     if anchor_list:
         lines = []
@@ -1290,7 +1314,11 @@ def _handle_anchor_call(tool: str, inp: dict) -> str:
                 datetime.strptime(time_hhmm, "%H:%M")
             except ValueError:
                 return "Time must be in HH:MM format."
-        a = anchors.add_anchor(day, text, time_hhmm)
+        raw_tags = inp.get("tags") or []
+        if not isinstance(raw_tags, list):
+            raw_tags = []
+        tags = [t.strip().lower() for t in raw_tags if isinstance(t, str) and t.strip()]
+        a = anchors.add_anchor(day, text, time_hhmm, tags=tags or None)
         when = f" at {a.time}" if a.time else ""
         return f"Anchor added ✅ — every {day.capitalize()}{when}: {text}"
 
