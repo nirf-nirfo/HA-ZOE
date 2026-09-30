@@ -1290,7 +1290,11 @@ def _handle_anchor_call(tool: str, inp: dict) -> str:
                 datetime.strptime(time_hhmm, "%H:%M")
             except ValueError:
                 return "Time must be in HH:MM format."
-        a = anchors.add_anchor(day, text, time_hhmm)
+        raw_tags = inp.get("tags") or []
+        if not isinstance(raw_tags, list):
+            raw_tags = []
+        tags = [t.strip().lower() for t in raw_tags if isinstance(t, str) and t.strip()]
+        a = anchors.add_anchor(day, text, time_hhmm, tags=tags or None)
         when = f" at {a.time}" if a.time else ""
         return f"Anchor added ✅ — every {day.capitalize()}{when}: {text}"
 

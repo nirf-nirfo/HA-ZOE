@@ -293,6 +293,11 @@ TOOL_POLICY = (
     "What: weekly recurring household schedule keyed by day-of-week; household-wide. "
     "When: 'on Sundays Mili finishes school at 13:00', 'every Tuesday I have soccer at 20:00'. "
     "Pass day (sunday..saturday), text, and optional 24-hour HH:MM. "
+    "When the anchor is a school-related time (school start, school end, school pickup), also "
+    "pass tags=['school']. ZOE uses this to automatically suppress the anchor from morning "
+    "briefings on Jewish-holiday days when the school is closed (חול המועד, first day of "
+    "Sukkot, etc.). Do the same for other categorizable anchors when it would help future "
+    "filtering — for now 'school' is the only one the briefing actually uses. "
     "Cancelling one occurrence only: 'no soccer this Sunday', 'Mili has no חוג next Tuesday' → "
     "suppress_anchor_for_date, keeping the weekly template intact. To REPLACE an anchor for a "
     "date with something different, suppress the anchor and add_agenda_item for that date. "
@@ -657,6 +662,12 @@ def _build_tools(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "time": {
                         "type": "string",
                         "description": "Optional 24-hour HH:MM (Israel time) when it happens. Omit if no specific time.",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional short tags describing what this anchor is (e.g. ['school'] for a school "
+                                       "start/end time). Enables briefing filters like 'skip school anchors during chol hamoed'.",
                     },
                 },
                 "required": ["day", "text"],
