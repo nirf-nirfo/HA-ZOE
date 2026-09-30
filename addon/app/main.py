@@ -487,21 +487,65 @@ async def _check_in_loop() -> None:
         for c in due:
             try:
                 logger.info("Firing check-in %s for %s", c.id, c.sender)
-                await _run_check_in(c.sender, c.prompt)
+                await _run_check_in(
+                    c.sender, c.id, c.prompt, c.last_fired_at, c.last_fired_text
+                )
             except Exception:
                 logger.exception("Check-in loop: failed to run %s", c.id)
 
 
-async def _run_check_in(sender: str, ci_prompt: str) -> None:
+def _prior_check_in_context(
+    sender: str, last_fired_at: float | None, last_fired_text: str | None
+) -> str:
+    """Builds the continuity block for the check-in framing. Empty string when
+    there's no prior fire — the model gets no extra text and behaves as before."""
+    if not last_fired_at or not last_fired_text:
+        return ""
+    minutes_ago = max(1, int((time.time() - last_fired_at) / 60))
+    lines = [
+        f"Your previous ping ({minutes_ago} minutes ago) said: '{last_fired_text}'."
+    ]
+    # Find the user's reply, if any, by scanning short-term memory for the last
+    # assistant turn matching that ping and taking the newest user turn after it.
+    # Turns don't carry timestamps, so anchoring on the previous ping's text is
+    # the most reliable way to know whether a later user turn was a reply to it.
+    try:
+        turns = conversation.recent(sender)
+    except Exception:
+        turns = []
+    anchor = -1
+    for i, t in enumerate(turns):
+        if t.get("role") == "assistant" and t.get("content") == last_fired_text:
+            anchor = i
+    if anchor >= 0:
+        reply = None
+        for t in turns[anchor + 1 :]:
+            if t.get("role") == "user":
+                reply = t.get("content")
+        if reply:
+            lines.append(f"The user replied: '{reply}'.")
+    lines.append("Reference that briefly if it's relevant; don't just repeat the same question.")
+    return "\n".join(lines)
+
+
+async def _run_check_in(
+    sender: str,
+    check_in_id: str,
+    ci_prompt: str,
+    last_fired_at: float | None = None,
+    last_fired_text: str | None = None,
+) -> None:
     """Runs a scheduled check-in as a restricted (read-only) agent turn, then
     delivers the composed message to the sender."""
     known_entities = get_known_entities()
     states = await ha_client.get_states(list(known_entities.keys()))
 
+    prior = _prior_check_in_context(sender, last_fired_at, last_fired_text)
+    prior_block = f"\n\n{prior}" if prior else ""
     framing = (
         "[SCHEDULED CHECK-IN — invoked by ZOE's scheduler, not by the user.]\n"
         f"You set up this check-in earlier. Follow this instruction to compose ONE natural "
-        f"WhatsApp message to send to the user NOW:\n\n{ci_prompt}\n\n"
+        f"WhatsApp message to send to the user NOW:\n\n{ci_prompt}{prior_block}\n\n"
         "Read any state you need via read-only tools, then reply with the final message text; "
         "it will be sent to the user verbatim."
     )
@@ -535,6 +579,12 @@ async def _run_check_in(sender: str, ci_prompt: str) -> None:
     marker = f"[scheduled check-in: {ci_prompt}]"
     conversation.record(sender, marker, final_text)
     conversation_log.append(sender, marker, final_text)
+    # Stash this fire on the (rescheduled) check-in row so the next tick can
+    # reference it. One-shots that pop_due removed become a no-op here.
+    try:
+        check_ins.record_fire(check_in_id, final_text)
+    except Exception:
+        logger.exception("Check-in %s: record_fire failed", check_in_id)
 
 
 async def _meta_window_loop() -> None:
