@@ -389,6 +389,6 @@ Never bump/deploy mid-phase.
 | 12 | 2026-09-30 | `3314777` | Check-in continuity: prior ping + user reply feed into next tick |
 | 13 | 2026-09-30 | `790cc40` | Phone → name resolver from memory facts; used in summaries/logs |
 | 14 | 2026-09-29 | `9097b67` | Bulk `GET /api/states`; ~2s → ~150ms per message |
-| 15 | — | — | in flight (bonus ultra review) |
+| 15 | 2026-09-30 | (merged) | Ultra review: no critical/high findings; M1 + M2 fixed in follow-up |
 | 16 | 2026-09-29 | `be752e1` | Meta 24h warning at ~23h (rebase-fixed mid-flight) |
 | 17 | 2026-09-30 | `2f86b99` | Prompt restructure into precedence-ranked sections; 24-scenario harness |
