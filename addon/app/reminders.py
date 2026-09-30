@@ -92,6 +92,7 @@ def normalize_recurring() -> int:
 
 
 _store: Store[Reminder] = Store(lambda: settings.reminders_path, Reminder)
+_from_dict = _store._from_dict
 
 
 def _load() -> list[Reminder]:

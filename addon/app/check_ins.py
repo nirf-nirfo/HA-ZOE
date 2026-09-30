@@ -33,6 +33,7 @@ class CheckIn:
 
 
 _store: Store[CheckIn] = Store(lambda: settings.check_ins_path, CheckIn)
+_from_dict = _store._from_dict
 
 
 def _load() -> list[CheckIn]:

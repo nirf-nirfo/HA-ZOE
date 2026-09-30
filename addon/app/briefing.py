@@ -24,6 +24,7 @@ class BriefingConfig:
 
 
 _store: Store[BriefingConfig] = Store(lambda: settings.briefing_config_path, BriefingConfig)
+_from_dict = _store._from_dict
 
 
 def _load() -> list[BriefingConfig]:

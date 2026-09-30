@@ -25,6 +25,7 @@ class Monitor:
 
 
 _store: Store[Monitor] = Store(lambda: settings.monitors_path, Monitor)
+_from_dict = _store._from_dict
 
 
 def _load() -> list[Monitor]:

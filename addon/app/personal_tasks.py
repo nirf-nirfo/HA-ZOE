@@ -19,6 +19,7 @@ class PersonalTask:
 
 
 _store: Store[PersonalTask] = Store(lambda: settings.personal_tasks_path, PersonalTask)
+_from_dict = _store._from_dict
 
 
 def _load() -> dict[str, list[dict]]:

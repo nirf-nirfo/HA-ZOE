@@ -26,6 +26,7 @@ class ScheduledAction:
 
 
 _store: Store[ScheduledAction] = Store(lambda: settings.scheduled_actions_path, ScheduledAction)
+_from_dict = _store._from_dict
 
 
 def _load() -> list[ScheduledAction]:

@@ -35,6 +35,7 @@ class RecurringExpense:
 
 
 _store: Store[RecurringExpense] = Store(lambda: settings.recurring_expenses_path, RecurringExpense)
+_from_dict = _store._from_dict
 
 
 def _load() -> list[RecurringExpense]:

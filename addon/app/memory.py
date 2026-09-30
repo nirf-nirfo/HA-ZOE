@@ -18,6 +18,7 @@ class Fact:
 
 
 _store: Store[Fact] = Store(lambda: settings.memory_path, Fact)
+_from_dict = _store._from_dict
 
 
 def _load() -> list[Fact]:

@@ -15,6 +15,7 @@ class ListItem:
 
 
 _store: Store[ListItem] = Store(lambda: settings.lists_path, ListItem)
+_from_dict = _store._from_dict
 
 
 def _load() -> dict[str, list[ListItem]]:

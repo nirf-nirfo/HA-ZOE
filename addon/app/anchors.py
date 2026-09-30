@@ -34,6 +34,8 @@ class Suppression:
 # store's I/O is unused (only its _from_dict is); _anchor_store owns the file.
 _anchor_store: Store[Anchor] = Store(lambda: settings.anchors_path, Anchor)
 _suppression_store: Store[Suppression] = Store(lambda: settings.anchors_path, Suppression)
+_anchor_from_dict = _anchor_store._from_dict
+_suppression_from_dict = _suppression_store._from_dict
 
 
 def _load() -> dict:

@@ -20,6 +20,7 @@ class AgendaItem:
 
 
 _store: Store[AgendaItem] = Store(lambda: settings.agenda_path, AgendaItem)
+_from_dict = _store._from_dict
 
 
 def _load() -> list[AgendaItem]:

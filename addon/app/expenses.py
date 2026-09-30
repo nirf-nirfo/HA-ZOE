@@ -38,6 +38,7 @@ class Expense:
 
 
 _store: Store[Expense] = Store(lambda: settings.expenses_path, Expense)
+_from_dict = _store._from_dict
 
 
 def _load() -> list[Expense]:
