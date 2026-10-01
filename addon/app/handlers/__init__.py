@@ -14,6 +14,7 @@ from app.claude_agent import (
     ANCHOR_TOOLS,
     CHECK_IN_TOOLS,
     CONVERSATION_TOOLS,
+    EMAIL_TOOLS,
     EXPENSE_TOOLS,
     LIST_TOOLS,
     MEMORY_TOOLS,
@@ -27,6 +28,7 @@ from app.handlers.anchors import _handle_anchor_call
 from app.handlers.check_ins import _handle_check_in_call
 from app.handlers.conversation import _handle_conversation_call
 from app.handlers.devices import _handle_device_call
+from app.handlers.email import _handle_email_call
 from app.handlers.expenses import _handle_expense_call
 from app.handlers.lists import _handle_list_call
 from app.handlers.memory import _handle_memory_call
@@ -87,6 +89,13 @@ async def _wrap_device(sender, tool, inp, known_entities, pending_actions):
     return await _handle_device_call(sender, tool, inp, known_entities, pending_actions)
 
 
+async def _wrap_email(sender, tool, inp, known_entities, pending_actions):
+    # Item 19: email handlers hit the IMAP server, so they're async by
+    # design (asyncio.to_thread around imaplib). Mirroring _wrap_device's
+    # shape so agent_loop can await uniformly.
+    return await _handle_email_call(sender, tool, inp)
+
+
 def _build_dispatch_table() -> dict[str, HandlerFn]:
     """Fan out each tool-family set into a single {tool_name: handler} map so
     dispatch is one dict lookup instead of a chain of `in` tests."""
@@ -103,6 +112,7 @@ def _build_dispatch_table() -> dict[str, HandlerFn]:
         (EXPENSE_TOOLS, _wrap_expense),
         (CHECK_IN_TOOLS, _wrap_check_in),
         (PERSONAL_TASK_TOOLS, _wrap_personal_task),
+        (EMAIL_TOOLS, _wrap_email),
     ):
         for name in names:
             table[name] = fn
