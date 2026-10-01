@@ -10,12 +10,123 @@ from typing import Any
 import yaml
 from anthropic import Anthropic
 
+from app.email_backend import EmailMessage
+from app.email_imap import ImapBackend
 from app.memory import all_facts
 from app.settings import settings
 
 logger = logging.getLogger(__name__)
 
 _client = Anthropic(api_key=settings.anthropic_api_key)
+
+# Item 19: one shared IMAP backend per process. The tool handlers below
+# short-circuit when settings.email_address or settings.email_password is
+# blank, so this construction is safe even without configured credentials
+# — the backend only opens a socket when a tool actually calls through to
+# it. Items 20/21 can import this instance directly for the receipt /
+# iCal auto-extract hooks and the hourly watch loop.
+_email_backend: ImapBackend = ImapBackend()
+
+
+def _email_configured() -> bool:
+    return bool(settings.email_address and settings.email_password)
+
+
+def _email_not_configured_result() -> str:
+    # Short user-visible string surfaced to the model as the tool result,
+    # so ZOE naturally paraphrases "email isn't set up yet" to the sender
+    # instead of raising a backend error that would surface as "an error
+    # occurred" in the WhatsApp reply.
+    return (
+        "email not configured — set EMAIL_ADDRESS and EMAIL_PASSWORD in the "
+        "add-on options"
+    )
+
+
+def _email_summary(msg: EmailMessage) -> dict[str, Any]:
+    return {
+        "uid": msg.uid,
+        "from": msg.from_addr,
+        "subject": msg.subject,
+        "date": msg.date.isoformat() if msg.date else "",
+        "snippet": msg.snippet,
+    }
+
+
+def _email_full(msg: EmailMessage) -> dict[str, Any]:
+    return {
+        "uid": msg.uid,
+        "from": msg.from_addr,
+        "to": list(msg.to_addrs),
+        "subject": msg.subject,
+        "date": msg.date.isoformat() if msg.date else "",
+        "body_text": msg.body_text,
+        "attachments": [
+            {
+                "filename": a.filename,
+                "content_type": a.content_type,
+                "size": a.size,
+            }
+            for a in msg.attachments
+        ],
+    }
+
+
+async def handle_list_recent_emails(
+    limit: int = 10, since_hours: int = 24
+) -> dict[str, Any]:
+    """Tool handler: snippet-only recent inbox view.
+
+    Returns a dict shaped like other tool results — a top-level key with
+    a list — so main.py's dispatcher can json.dumps() it the same way as
+    `list_recent_expenses`. The payload intentionally omits bodies and
+    attachment bytes so the agent's context stays cheap on a routine
+    "any new email?" query.
+    """
+    if not _email_configured():
+        return {"error": _email_not_configured_result()}
+    try:
+        messages = await _email_backend.list_recent(
+            limit=limit, since_hours=since_hours
+        )
+    except Exception as exc:
+        logger.exception("list_recent_emails failed")
+        return {"error": f"could not fetch email: {exc.__class__.__name__}"}
+    return {"emails": [_email_summary(m) for m in messages]}
+
+
+async def handle_read_email(uid: str) -> dict[str, Any]:
+    """Tool handler: full body + attachment metadata for one message.
+
+    Attachment payload bytes are intentionally excluded from the tool
+    output: Items 20/21 call `_email_backend.fetch(uid)` directly for the
+    bytes, and keeping them out of the context window keeps a single
+    read_email call from pushing a 2 MB PDF through the agent.
+    """
+    if not _email_configured():
+        return {"error": _email_not_configured_result()}
+    try:
+        msg = await _email_backend.fetch(uid)
+    except Exception as exc:
+        logger.exception("read_email failed")
+        return {"error": f"could not read email: {exc.__class__.__name__}"}
+    if msg is None:
+        return {"error": "message not found"}
+    return _email_full(msg)
+
+
+async def handle_search_emails(
+    query: str, limit: int = 10
+) -> dict[str, Any]:
+    """Tool handler: free-text IMAP search; snippet-only results."""
+    if not _email_configured():
+        return {"error": _email_not_configured_result()}
+    try:
+        messages = await _email_backend.search(query, limit=limit)
+    except Exception as exc:
+        logger.exception("search_emails failed")
+        return {"error": f"could not search email: {exc.__class__.__name__}"}
+    return {"emails": [_email_summary(m) for m in messages]}
 
 
 def _log_usage(label: str, model: str, usage: Any) -> None:
@@ -99,6 +210,12 @@ _ADD_RECURRING_EXPENSE = "add_recurring_expense"
 _LIST_RECURRING_EXPENSES = "list_recurring_expenses"
 _REMOVE_RECURRING_EXPENSE = "remove_recurring_expense"
 
+# Item 19: read-only email access. Items 20/21 build on these three tools:
+# receipt / iCal auto-extract (Item 20) and the hourly watch loop (Item 21).
+_LIST_RECENT_EMAILS = "list_recent_emails"
+_READ_EMAIL = "read_email"
+_SEARCH_EMAILS = "search_emails"
+
 REMINDER_TOOLS = {
     _SET_REMINDER,
     _LIST_REMINDERS,
@@ -125,11 +242,17 @@ CHECK_IN_ALLOWED_TOOLS = {
     _LIST_SCHEDULED_ACTIONS, _LIST_RECURRING_EXPENSES, _LIST_RECENT_EXPENSES,
     _EXPENSE_SUMMARY, _SHOW_LIST, _SHOW_ALL_LISTS, _SEARCH_CONVERSATIONS,
     _LIST_PERSONAL_TASKS,
+    # Item 19: email tools are read-only, so they're also safe to call from
+    # inside a check-in prompt (e.g. "every morning scan email for shipping
+    # notifications and tell me what's due today").
+    _LIST_RECENT_EMAILS, _READ_EMAIL, _SEARCH_EMAILS,
 }
 EXPENSE_TOOLS = {
     _ADD_EXPENSE, _DELETE_LAST_EXPENSE, _FIX_LAST_EXPENSE, _LIST_RECENT_EXPENSES, _EXPENSE_SUMMARY,
     _ADD_RECURRING_EXPENSE, _LIST_RECURRING_EXPENSES, _REMOVE_RECURRING_EXPENSE,
 }
+# Email tools are read-only; safe for check-ins and interactive turns alike.
+EMAIL_TOOLS = {_LIST_RECENT_EMAILS, _READ_EMAIL, _SEARCH_EMAILS}
 # Tools whose successful use should broadcast the reply to all household senders,
 # not just the one who sent the request. Everything else stays private to the sender.
 BROADCAST_TOOLS = {
@@ -391,6 +514,19 @@ TOOL_POLICY = (
     "for Y'. "
     "When NOT: the last 24h of exchanges are ALREADY visible to you in this thread — don't "
     "search for things obviously in front of you. "
+    "\n\n"
+    "## Email (read-only, private to the sender)\n"
+    "\n"
+    "### list_recent_emails / read_email / search_emails\n"
+    "What: on-demand read-only access to the household inbox over IMAP. "
+    "list_recent_emails returns snippet-only recent messages; read_email returns one full body "
+    "by uid; search_emails runs a free-text search and returns snippet-only matches. "
+    "When: user asks about email — 'any new email?', 'did I get a reply from X?', 'find the "
+    "Amazon shipping email', 'read that email from the school'. "
+    "When NOT: NEVER send email; there is no outbound tool. Do NOT volunteer unread counts, "
+    "summaries, or digests unless the user asked about email. Treat email tool results as "
+    "PRIVATE to the sender who asked — like search_past_conversations, no household broadcast "
+    "on email results (see BROADCAST SEMANTICS). "
     "\n\n"
     "## Free-form answers and web search\n"
     "\n"
@@ -1181,6 +1317,64 @@ def _build_tools(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         "type": "integer",
                         "description": "Optional: only look at exchanges from the last N days. "
                         "Omit to search all available history.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+        {
+            "name": _LIST_RECENT_EMAILS,
+            "description": "Lists recent emails in the household inbox, snippet-only. Returns "
+            "uid, from, subject, date, and a short preview of the body for each. Use for 'any new "
+            "email?', 'what's in the inbox?'. Call read_email with a uid to see one in full. "
+            "Read-only; ZOE never sends email.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max messages to return (default 10).",
+                    },
+                    "since_hours": {
+                        "type": "integer",
+                        "description": "Only include messages received in the last N hours "
+                        "(default 24).",
+                    },
+                },
+            },
+        },
+        {
+            "name": _READ_EMAIL,
+            "description": "Returns the full body of one email by uid (plus from, to, subject, "
+            "date, and a list of attachment metadata: filename, content_type, size). Use after "
+            "list_recent_emails or search_emails to open a specific message the user asks about.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "uid": {
+                        "type": "string",
+                        "description": "The uid returned by list_recent_emails or search_emails.",
+                    },
+                },
+                "required": ["uid"],
+            },
+        },
+        {
+            "name": _SEARCH_EMAILS,
+            "description": "Searches the household inbox for a free-text query (server-side IMAP "
+            "search). Returns snippet-only matches. Use for 'any email from the school?', 'find "
+            "the Amazon shipping email', 'did we get the invoice from X?'.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Free-text search query — a distinctive word or short "
+                        "phrase expected to appear in the message.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max matches to return (default 10).",
                     },
                 },
                 "required": ["query"],
