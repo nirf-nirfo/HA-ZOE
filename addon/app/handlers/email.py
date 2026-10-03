@@ -54,6 +54,14 @@ async def _handle_email_call(sender: str, tool: str, inp: dict) -> str:  # noqa:
         payload = await claude_agent.handle_search_emails(
             query=query, limit=_to_int(inp.get("limit"), 10)
         )
+    elif tool == claude_agent._PROCESS_EMAIL_NOW:
+        # Item 20: manual trigger for the receipt + iCal extractors. The
+        # handler itself fetches the full message and runs the processor
+        # with force=True, so this one wrapper call does the whole flow.
+        uid = (inp.get("uid") or "").strip()
+        if not uid:
+            return json.dumps({"error": "uid is required"})
+        payload = await claude_agent.handle_process_email_now(uid=uid)
     else:
         return ""
     # ensure_ascii=False so Hebrew subject lines don't come back as \uXXXX

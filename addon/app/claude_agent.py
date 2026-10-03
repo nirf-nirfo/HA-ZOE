@@ -129,6 +129,37 @@ async def handle_search_emails(
     return {"emails": [_email_summary(m) for m in messages]}
 
 
+async def handle_process_email_now(uid: str) -> dict[str, Any]:
+    """Tool handler for Item 20's manual trigger.
+
+    Flow: fetch the full message (body + attachments) via `_email_backend.fetch`
+    and run `email_processor.process_email` with `force=True` so the user can
+    smoke-test the receipt + iCal extractors from WhatsApp regardless of the
+    `email_auto_extract` flag. Side effects of the extractors (an added
+    expense broadcasts to the household, an added agenda event notifies the
+    primary sender) are the processor's responsibility — this handler just
+    returns the structured result for the model to paraphrase.
+    """
+    # Local import so email_processor's import graph (which pulls in
+    # whatsapp.send_message) stays off the module-load path.
+    from app import email_processor
+
+    if not _email_configured():
+        return {"error": _email_not_configured_result()}
+    try:
+        msg = await _email_backend.fetch(uid)
+    except Exception as exc:
+        logger.exception("process_email_now fetch failed")
+        return {"error": f"could not read email: {exc.__class__.__name__}"}
+    if msg is None:
+        return {"error": "message not found"}
+    try:
+        return await email_processor.process_email(msg, force=True)
+    except Exception as exc:
+        logger.exception("process_email_now processor failed uid=%s", uid)
+        return {"error": f"processing failed: {exc.__class__.__name__}"}
+
+
 def _log_usage(label: str, model: str, usage: Any) -> None:
     """Log model + input / cache_read / cache_write / output token counts for a turn.
 
@@ -215,6 +246,10 @@ _REMOVE_RECURRING_EXPENSE = "remove_recurring_expense"
 _LIST_RECENT_EMAILS = "list_recent_emails"
 _READ_EMAIL = "read_email"
 _SEARCH_EMAILS = "search_emails"
+# Item 20: manual trigger for the receipt + iCal extractors. Writes to
+# state (expenses + agenda), so this one stays OUT of CHECK_IN_ALLOWED_TOOLS
+# below — check-ins are read-only by design.
+_PROCESS_EMAIL_NOW = "process_email_now"
 
 REMINDER_TOOLS = {
     _SET_REMINDER,
@@ -251,8 +286,10 @@ EXPENSE_TOOLS = {
     _ADD_EXPENSE, _DELETE_LAST_EXPENSE, _FIX_LAST_EXPENSE, _LIST_RECENT_EXPENSES, _EXPENSE_SUMMARY,
     _ADD_RECURRING_EXPENSE, _LIST_RECURRING_EXPENSES, _REMOVE_RECURRING_EXPENSE,
 }
-# Email tools are read-only; safe for check-ins and interactive turns alike.
-EMAIL_TOOLS = {_LIST_RECENT_EMAILS, _READ_EMAIL, _SEARCH_EMAILS}
+# Email tools surfaced to the agent. The three read-only ones (Item 19)
+# are safe for check-ins; `process_email_now` (Item 20) mutates state
+# (expenses + agenda) so it's NOT in CHECK_IN_ALLOWED_TOOLS.
+EMAIL_TOOLS = {_LIST_RECENT_EMAILS, _READ_EMAIL, _SEARCH_EMAILS, _PROCESS_EMAIL_NOW}
 # Tools whose successful use should broadcast the reply to all household senders,
 # not just the one who sent the request. Everything else stays private to the sender.
 BROADCAST_TOOLS = {
@@ -515,7 +552,7 @@ TOOL_POLICY = (
     "When NOT: the last 24h of exchanges are ALREADY visible to you in this thread — don't "
     "search for things obviously in front of you. "
     "\n\n"
-    "## Email (read-only, private to the sender)\n"
+    "## Email (read-only lookups, plus one explicit extract-trigger)\n"
     "\n"
     "### list_recent_emails / read_email / search_emails\n"
     "What: on-demand read-only access to the household inbox over IMAP. "
@@ -527,6 +564,18 @@ TOOL_POLICY = (
     "summaries, or digests unless the user asked about email. Treat email tool results as "
     "PRIVATE to the sender who asked — like search_past_conversations, no household broadcast "
     "on email results (see BROADCAST SEMANTICS). "
+    "\n\n"
+    "### process_email_now\n"
+    "What: given a uid (from list_recent_emails or search_emails), runs the receipt + iCal "
+    "auto-extractors on that one email — a detected receipt is added to the household expense "
+    "ledger (broadcasts to both senders, like any other add_expense), and detected calendar "
+    "invites are added to the primary household sender's agenda. "
+    "When: user explicitly asks to 'process' / 'extract' / 'file' / 'add to agenda or expenses' "
+    "a specific email they already pointed you at. "
+    "When NOT: NEVER call speculatively — this mutates state. Also, Item 21's hourly watch loop "
+    "(future) will auto-process email when the `email_auto_extract` flag is on; today that flag "
+    "defaults to OFF, so nothing auto-happens and process_email_now is the one way to run the "
+    "extractors from WhatsApp. "
     "\n\n"
     "## Free-form answers and web search\n"
     "\n"
@@ -1378,6 +1427,27 @@ def _build_tools(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     },
                 },
                 "required": ["query"],
+            },
+        },
+        {
+            "name": _PROCESS_EMAIL_NOW,
+            "description": "Runs the receipt + iCal auto-extractors on ONE email identified by "
+            "uid, regardless of the `email_auto_extract` setting. A detected receipt is added "
+            "to the household expense ledger and broadcast to both senders; detected calendar "
+            "invites (.ics or inline VCALENDAR) are added to the primary household sender's "
+            "agenda, de-duplicated against existing agenda items for that date. Use when the "
+            "user asks you to 'process' / 'extract' / 'file' / 'add to agenda / expenses' a "
+            "specific email they already identified via list_recent_emails or search_emails. "
+            "Mutates state — do NOT call speculatively.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "uid": {
+                        "type": "string",
+                        "description": "The uid returned by list_recent_emails or search_emails.",
+                    },
+                },
+                "required": ["uid"],
             },
         },
         {"type": "web_search_20250305", "name": "web_search", "max_uses": 3},
