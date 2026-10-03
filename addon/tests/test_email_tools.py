@@ -196,3 +196,79 @@ def test_dispatcher_requires_query(monkeypatch, configured_email):
 def test_dispatcher_unknown_tool_returns_empty():
     out = _run(_handle_email_call("s", "not-a-tool", {}))
     assert out == ""
+
+
+# ------------------------------------------- Item 20: process_email_now tool
+
+
+def test_process_email_now_requires_uid(monkeypatch, configured_email):
+    # Mirrors the uid guard the other two write-shaped email tools use —
+    # dispatcher refuses an empty uid before touching the backend.
+    backend = AsyncMock()
+    monkeypatch.setattr(claude_agent, "_email_backend", backend)
+    out = _run(_handle_email_call("s", claude_agent._PROCESS_EMAIL_NOW, {"uid": ""}))
+    assert json.loads(out) == {"error": "uid is required"}
+    backend.fetch.assert_not_awaited()
+
+
+def test_process_email_now_blank_credentials(monkeypatch, blank_email):
+    backend = AsyncMock()
+    monkeypatch.setattr(claude_agent, "_email_backend", backend)
+    out = _run(claude_agent.handle_process_email_now(uid="1"))
+    assert out["error"].startswith("email not configured")
+    backend.fetch.assert_not_awaited()
+
+
+def test_process_email_now_missing_message(monkeypatch, configured_email):
+    backend = AsyncMock()
+    backend.fetch.return_value = None
+    monkeypatch.setattr(claude_agent, "_email_backend", backend)
+
+    out = _run(claude_agent.handle_process_email_now(uid="nope"))
+    assert out == {"error": "message not found"}
+
+
+def test_process_email_now_delegates_to_processor_with_force(
+    monkeypatch, configured_email
+):
+    # The manual tool MUST pass force=True so it works regardless of the
+    # email_auto_extract setting.
+    msg = _canned_message(uid="42")
+    backend = AsyncMock()
+    backend.fetch.return_value = msg
+    monkeypatch.setattr(claude_agent, "_email_backend", backend)
+
+    from app import email_processor
+    fake_process = AsyncMock(
+        return_value={"status": "processed", "receipt": {"status": "not_receipt"},
+                      "ical": {"status": "no_events"}}
+    )
+    monkeypatch.setattr(email_processor, "process_email", fake_process)
+
+    out = _run(claude_agent.handle_process_email_now(uid="42"))
+    assert out["status"] == "processed"
+    backend.fetch.assert_awaited_once_with("42")
+    fake_process.assert_awaited_once()
+    assert fake_process.await_args.kwargs.get("force") is True
+
+
+def test_dispatcher_wraps_process_email_now(monkeypatch, configured_email):
+    msg = _canned_message(uid="d-42")
+    backend = AsyncMock()
+    backend.fetch.return_value = msg
+    monkeypatch.setattr(claude_agent, "_email_backend", backend)
+
+    from app import email_processor
+    monkeypatch.setattr(
+        email_processor,
+        "process_email",
+        AsyncMock(return_value={"status": "processed",
+                                "receipt": {"status": "not_receipt"},
+                                "ical": {"status": "no_events"}}),
+    )
+
+    out = _run(
+        _handle_email_call("s", claude_agent._PROCESS_EMAIL_NOW, {"uid": "d-42"})
+    )
+    data = json.loads(out)
+    assert data["status"] == "processed"
