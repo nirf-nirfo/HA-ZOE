@@ -34,6 +34,14 @@ class Settings(BaseSettings):
     check_ins_path: str = "/data/check_ins.json"
     personal_tasks_path: str = "/data/personal_tasks.json"
     inbound_tracker_path: str = "/data/inbound_tracker.json"
+    # Item 19: read-only email access via IMAP + an app password. Items 20/21
+    # (receipt / iCal auto-extract, hourly watch loop) build on this. Blank
+    # address / password means "email not configured" and the tools short-
+    # circuit with a user-visible message rather than attempting a login.
+    email_imap_host: str = "imap.gmail.com"
+    email_imap_port: int = 993
+    email_address: str = ""
+    email_password: str = ""  # app password; never logged
     # Transcription server (Home Assistant Wyoming/Whisper). Overridable via the
     # add-on options (whisper_host / whisper_port) so an HA IP change doesn't
     # silently break voice transcription; defaults kept as a fallback.
