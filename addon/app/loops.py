@@ -5,16 +5,16 @@ directly. `spawn_loops()` is called from main.py's startup handler.
 """
 import asyncio
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from app import (
-    agenda, anchors, briefing, check_ins, inbound_tracker, monitors,
-    recurring_expenses, scheduled_actions, senders,
+    agenda, anchors, briefing, check_ins, email_watches, inbound_tracker,
+    monitors, recurring_expenses, scheduled_actions, senders,
 )
 from app.agent_loop import _allowed_senders, _run_check_in
 from app.briefing_compile import _compile_evening_briefing, _compile_morning_briefing
-from app.claude_agent import get_known_entities
+from app.claude_agent import _email_backend, get_known_entities
 from app.confirmation import make_pending, store_pending
 from app.ha_client import ha_client
 from app.handlers.scheduled_actions import _auto_turn_off_later, _execute_control_action
@@ -22,6 +22,16 @@ from app.logging_config import logger
 from app.reminders import pop_due
 from app.status import _beat
 from app.whatsapp import send_message
+
+# Item 21 depends on Item 20's email_processor.process_email. If Item 20 hasn't
+# merged yet (we may land first on main), skip gracefully instead of killing
+# the whole app's import graph — the loop logs and no-ops until the module
+# shows up. Once Item 20 lands this import succeeds and the loop processes
+# matches normally.
+try:
+    from app import email_processor  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - exercised in environments missing Item 20
+    email_processor = None  # type: ignore[assignment]
 
 _IL_TZ = ZoneInfo("Asia/Jerusalem")
 
@@ -200,6 +210,105 @@ async def _meta_window_loop() -> None:
                 logger.exception("Meta-window loop: failed for %s", sender)
 
 
+def _watch_matches(watch: "email_watches.EmailWatch", msg) -> bool:
+    """Returns True iff this snippet-level EmailMessage matches every non-empty
+    filter on the watch (AND over configured fields; case-insensitive).
+
+    Empty filter fields are skipped — a watch with only from_contains set
+    behaves as "every email from that sender". Nothing is "matches everything":
+    the tool handler already refuses a watch with all three filters blank.
+    """
+    needles = [
+        (watch.from_contains, msg.from_addr),
+        (watch.subject_contains, msg.subject),
+        (watch.body_contains, msg.snippet),
+    ]
+    for needle, haystack in needles:
+        if not needle:
+            continue
+        if needle.lower() not in (haystack or "").lower():
+            return False
+    return True
+
+
+async def _email_watch_loop() -> None:
+    """Item 21: evaluates each enabled email watch at its own interval, hands
+    newly matched messages to `email_processor.process_email`, and remembers
+    the processed UIDs so the same message is never acted on twice.
+
+    Base cadence is 60s; each watch respects its own interval_minutes.
+    """
+    while True:
+        await asyncio.sleep(60)
+        _beat("email_watch")
+        try:
+            watches = email_watches.list_watches()
+        except Exception:
+            _beat("email_watch", ok=False)
+            logger.exception("Email watch loop: list_watches failed")
+            continue
+        if not watches:
+            # No-op tick: the heartbeat above is enough; nothing to do.
+            continue
+        if email_processor is None:
+            # Item 20 hasn't landed yet; log once per tick at debug (not warn)
+            # so a long gap between items doesn't spam the add-on log.
+            logger.debug("Email watch loop: email_processor unavailable; skipping tick")
+            continue
+        now = datetime.now(timezone.utc)
+        for watch in watches:
+            try:
+                if not watch.enabled:
+                    continue
+                if watch.last_checked_at is not None:
+                    due_at = watch.last_checked_at + timedelta(minutes=watch.interval_minutes)
+                    if now < due_at:
+                        continue
+                # Pull a generous window of recent headers so a transient IMAP
+                # hiccup or a sender-side delay can't drop a message between ticks.
+                since_hours = max((watch.interval_minutes // 60) * 2, 2)
+                recent = await _email_backend.list_recent(
+                    limit=20, since_hours=since_hours
+                )
+                already = set(watch.last_processed_uids)
+                matched_uids: list[str] = []
+                for header in recent:
+                    if header.uid in already:
+                        continue
+                    if not _watch_matches(watch, header):
+                        continue
+                    try:
+                        full = await _email_backend.fetch(header.uid)
+                    except Exception:
+                        logger.exception(
+                            "Email watch loop: fetch(%s) failed for watch %s (%s)",
+                            header.uid, watch.id, watch.name,
+                        )
+                        continue
+                    if full is None:
+                        continue
+                    try:
+                        result = email_processor.process_email(full)
+                        if asyncio.iscoroutine(result):
+                            await result
+                    except Exception:
+                        logger.exception(
+                            "Email watch loop: process_email failed for uid=%s watch=%s (%s)",
+                            header.uid, watch.id, watch.name,
+                        )
+                        # Still mark the uid processed so a persistently bad
+                        # message doesn't retry forever and starve newer ones.
+                    matched_uids.append(header.uid)
+                if matched_uids:
+                    email_watches.mark_uids_processed(watch.id, matched_uids)
+                email_watches.update_last_checked(watch.id, now)
+            except Exception:
+                logger.exception(
+                    "Email watch loop: watch %s (%s) failed; continuing",
+                    getattr(watch, "id", "?"), getattr(watch, "name", "?"),
+                )
+
+
 async def _reminder_loop() -> None:
     while True:
         await asyncio.sleep(60)
@@ -221,10 +330,13 @@ async def _reminder_loop() -> None:
 
 
 def spawn_loops() -> None:
-    """Called from FastAPI startup. Fires all six background loops as tasks."""
+    """Called from FastAPI startup. Fires all background loops as tasks."""
     asyncio.create_task(_reminder_loop())
     asyncio.create_task(_monitor_loop())
     asyncio.create_task(_scheduled_action_loop())
     asyncio.create_task(_daily_briefing_loop())
     asyncio.create_task(_check_in_loop())
     asyncio.create_task(_meta_window_loop())
+    # Item 21: hourly inbox watches. Base cadence 60s with per-watch
+    # interval_minutes gating; see `_email_watch_loop` for the full contract.
+    asyncio.create_task(_email_watch_loop())
