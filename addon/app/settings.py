@@ -39,6 +39,13 @@ class Settings(BaseSettings):
     # silently break voice transcription; defaults kept as a fallback.
     whisper_host: str = "192.168.10.150"
     whisper_port: int = 10300
+    # Item 18B: voice transcription backend. "openai" sends raw OGG to OpenAI's
+    # Whisper API (fast, cloud); "wyoming" uses the on-LAN HA Whisper add-on
+    # above (slower, flaky). Default is openai, but if `openai_api_key` is empty
+    # the router falls back to wyoming with a WARNING so a half-configured
+    # deployment still transcribes instead of silently dropping voice notes.
+    transcribe_backend: str = "openai"
+    openai_api_key: str = ""
     # Item 04: when true, interactive turns use Sonnet 5 (check-ins stay on Opus 5).
     # Default off; user opts in via the add-on option and Item 17 validates before we
     # flip the shipped default.

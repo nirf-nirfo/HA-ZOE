@@ -248,6 +248,15 @@ async def _process_message(parsed) -> None:
 
     if parsed.audio_id:
         logger.info("Inbound voice from %s, transcribing...", sender)
+        # Fire-and-forget ack so the user sees something within a second, well
+        # before transcription (ffmpeg + Whisper) completes. Errors here must
+        # never block the transcription path — swallow them.
+        async def _send_ack() -> None:
+            try:
+                await send_message(sender, "\U0001F399️ שומעת רגע...")
+            except Exception:
+                logger.exception("Voice ack to %s failed", sender)
+        asyncio.create_task(_send_ack())
         text = await transcribe_audio(parsed.audio_id)
         if not text:
             await send_message(sender, "Sorry, I couldn't understand the voice message.")

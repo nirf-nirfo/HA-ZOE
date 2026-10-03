@@ -21,6 +21,8 @@ options:
   confirmation_ttl_seconds: 120
   whisper_host: "192.168.10.150"
   whisper_port: 10300
+  transcribe_backend: "openai"
+  openai_api_key: ""
   model_routing_hybrid: false
   briefing_model_compose: false
 schema:
@@ -34,6 +36,8 @@ schema:
   confirmation_ttl_seconds: int
   whisper_host: str
   whisper_port: int
+  transcribe_backend: "list(openai|wyoming)"
+  openai_api_key: password
   model_routing_hybrid: bool
   briefing_model_compose: bool
 homeassistant_api: true
