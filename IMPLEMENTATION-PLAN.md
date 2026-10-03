@@ -317,6 +317,71 @@ Once phases A–C land, run `/code-review ultra` against the refactored codebase
 
 ---
 
+## Phase E — Email post-Phase D (queued, not launched)
+
+### [ ] Item 22 — Spam auto-triage with scheduler
+**Budget:** ~$3 (implementation, Sonnet agent) · **Risk:** medium (writes to the live inbox) · **Branch:** `step-22-spam-triage`
+
+Builds on Items 19–21. Teaches ZOE to triage spam in the household inbox on a schedule the user owns, moving confident spam to the provider's Spam folder and asking about the uncertain ones over WhatsApp. **Not** hard-delete — move-to-Spam only (recoverable for 30 days on Gmail/Yahoo/iCloud).
+
+**New IMAP write methods** (`addon/app/email_imap.py`):
+- `move_to_spam(uid)`, `move_to_folder(uid, folder)`, `mark_read(uid)`
+- Auto-detect the provider's Spam folder name (Gmail `[Gmail]/Spam`, Yahoo `Bulk Mail`, iCloud `Junk`) via `LIST` on first run; override via `email_spam_folder` setting if detection fails.
+- Guard: all write methods noop if `settings.email_write_enabled` is False (default). Nothing destructive happens before the user opts in.
+
+**New store** (`addon/app/spam_scan_schedule.py`): per-household (not per-sender) `SpamScanSchedule` row with `start_hour`, `end_hour`, `interval_hours`, `tz` (default `Asia/Jerusalem`), `enabled`. Managed by Claude tools, NOT by `config.yaml` options:
+- `set_spam_scan_schedule(start_hour, end_hour, interval_hours)` — "scan 8–20 every 2h"
+- `show_spam_scan_schedule()`, `disable_spam_scan()`, `enable_spam_scan()`
+
+**New store** (`addon/app/spam_sender_memory.py`): learned verdicts `{from_addr → "spam" | "legit", confidence, last_updated}`. Populated by user confirmations and auto-moves. The scanner checks this FIRST before calling the LLM — most of a steady-state inbox routes without a model call.
+
+**New store + audit log** (`addon/app/spam_audit.py`): every scan decision logged — `{uid, from, subject, verdict, confidence, action, timestamp}`. Rolling 30-day retention. Lets the user review what was moved during dry-run.
+
+**Classifier module** (`addon/app/spam_classifier.py`):
+- Model: **Haiku 4.5** (`claude-haiku-4-5` — $1/$5 per MTok, plenty for this binary call).
+- Input: sender + subject + first ~200 chars of snippet (not full body — ~1k tokens total).
+- **Prompt caching** on the system prompt (classifier instructions are fixed → cache reads ~$0.03/MTok on Haiku).
+- **Batch of 5–10 emails per call** when the scan has that many candidates — shared system prompt only paid once.
+- Returns `{verdict, confidence, reason}` per email.
+- Decision table:
+  - sender memory hit → use memory, no LLM call
+  - LLM `verdict=spam` + `confidence ≥ 0.9` → move to Spam + log + update sender memory
+  - LLM `0.6 ≤ confidence < 0.9` OR `verdict=uncertain` → WhatsApp confirmation (reuse `confirmation.py`): `💭 ספאם? "<subject>" מ-<sender>. כן/לא`. On yes/no, act + update sender memory.
+  - LLM `verdict=legit` OR `confidence < 0.6` → do nothing
+
+**Dry-run week:**
+- New setting `email_scan_dry_run: bool = True` (default ON).
+- When ON: scanner runs classifier + logs to audit, but **doesn't move anything** and **doesn't ask the user**. First week lets the user review the audit log and spot bad calls before going live.
+- New tool `show_spam_audit(days=7)` to review decisions.
+- User flips to False via a new tool `enable_spam_live_mode()` (deliberate step, not a flag flip in HA UI).
+
+**Scheduled scan loop** (`addon/app/loops.py`):
+- Reads the schedule from `spam_scan_schedule.json` each tick.
+- Only acts when `now` is within `[start_hour, end_hour)` in the schedule's TZ AND `now - last_scan_at >= interval_hours`.
+- Scans **unread** inbox (`IMAP SEARCH UNSEEN`) since last scan.
+- Dedup against audit log by UID.
+- Allowlist check: `settings.email_spam_allowlist` (comma-separated patterns) never touched regardless of classifier output. New tool `add_spam_allowlist(sender_pattern)`.
+- Heartbeat on `/admin/status` like Item 21's watch loop.
+
+**Settings additions:**
+- `email_write_enabled: bool = False`
+- `email_scan_dry_run: bool = True`
+- `email_spam_folder: str = ""` (blank = auto-detect)
+- `email_spam_allowlist: str = ""` (comma-separated)
+- `email_spam_classifier_model: str = "claude-haiku-4-5"` (overridable if Haiku misbehaves)
+
+**Target runtime cost:** ~$2/month at ~120 emails/day scanned with sender memory warm (most emails skip the LLM entirely).
+
+**Acceptance:**
+- Dry-run week: audit log shows classifier verdicts, nothing moved, nothing broadcast.
+- Live mode: `email_write_enabled=true` + `email_scan_dry_run=false` → confident spam moves to Spam, uncertain prompts WhatsApp, user yes/no completes the loop.
+- Schedule set via WhatsApp (`"סרקי ספאם בין 8 ל-20 כל שעתיים"`) persists across restarts.
+- All existing tests still pass; new tests cover classifier batching, sender memory hit/miss, dry-run gating, schedule window logic, allowlist bypass.
+
+**Not launched yet** — queued per user decision 2026-10-03: insufficient Pro plan weekly token budget this cycle to safely finish without the agent being cut off mid-run.
+
+---
+
 ## Budget summary
 
 | Item | Budget | Cumulative |
@@ -396,3 +461,4 @@ Never bump/deploy mid-phase.
 | 19 | 2026-10-03 | `baf49a0` | Email foundation: `EmailBackend` protocol + IMAP + 3 read-only tools |
 | 20 | 2026-10-03 | `c81cebe` | Email intelligence: receipt + iCal auto-extract behind `email_auto_extract` flag (default OFF) |
 | 21 | 2026-10-03 | `d0c3af9` | Email watch loop: hourly ticks, per-watch `interval_minutes` override, UID dedup |
+| 22 | — | — | queued (spam auto-triage: Haiku classifier + sender memory + user-set schedule + dry-run week → ~$2/mo runtime) |
