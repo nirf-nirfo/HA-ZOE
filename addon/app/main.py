@@ -112,6 +112,7 @@ from app.loops import (  # noqa: F401
     _INACTIVE_CUTOFF_HOURS,
     _check_in_loop,
     _daily_briefing_loop,
+    _email_watch_loop,
     _meta_window_loop,
     _monitor_loop,
     _reminder_loop,

@@ -251,6 +251,14 @@ _SEARCH_EMAILS = "search_emails"
 # below — check-ins are read-only by design.
 _PROCESS_EMAIL_NOW = "process_email_now"
 
+# Item 21: email watches — declarative inbox filters evaluated by the hourly
+# watch loop. These tools mutate state so they stay off the check-in allow-list.
+_ADD_EMAIL_WATCH = "add_email_watch"
+_LIST_EMAIL_WATCHES = "list_email_watches"
+_DELETE_EMAIL_WATCH = "delete_email_watch"
+_ENABLE_EMAIL_WATCH = "enable_email_watch"
+_DISABLE_EMAIL_WATCH = "disable_email_watch"
+
 REMINDER_TOOLS = {
     _SET_REMINDER,
     _LIST_REMINDERS,
@@ -286,10 +294,20 @@ EXPENSE_TOOLS = {
     _ADD_EXPENSE, _DELETE_LAST_EXPENSE, _FIX_LAST_EXPENSE, _LIST_RECENT_EXPENSES, _EXPENSE_SUMMARY,
     _ADD_RECURRING_EXPENSE, _LIST_RECURRING_EXPENSES, _REMOVE_RECURRING_EXPENSE,
 }
-# Email tools surfaced to the agent. The three read-only ones (Item 19)
-# are safe for check-ins; `process_email_now` (Item 20) mutates state
-# (expenses + agenda) so it's NOT in CHECK_IN_ALLOWED_TOOLS.
+# Email tools surfaced to the agent. The three read-only ones (Item 19) are
+# safe for check-ins; `process_email_now` (Item 20) mutates state (expenses +
+# agenda) so it's NOT in CHECK_IN_ALLOWED_TOOLS.
 EMAIL_TOOLS = {_LIST_RECENT_EMAILS, _READ_EMAIL, _SEARCH_EMAILS, _PROCESS_EMAIL_NOW}
+# Item 21: email-watch management tools. They mutate state (adding / removing
+# background watches), so they're deliberately OUT of CHECK_IN_ALLOWED_TOOLS —
+# a scheduled check-in should never silently register new watches on its own.
+EMAIL_WATCH_TOOLS = {
+    _ADD_EMAIL_WATCH,
+    _LIST_EMAIL_WATCHES,
+    _DELETE_EMAIL_WATCH,
+    _ENABLE_EMAIL_WATCH,
+    _DISABLE_EMAIL_WATCH,
+}
 # Tools whose successful use should broadcast the reply to all household senders,
 # not just the one who sent the request. Everything else stays private to the sender.
 BROADCAST_TOOLS = {
@@ -572,10 +590,24 @@ TOOL_POLICY = (
     "invites are added to the primary household sender's agenda. "
     "When: user explicitly asks to 'process' / 'extract' / 'file' / 'add to agenda or expenses' "
     "a specific email they already pointed you at. "
-    "When NOT: NEVER call speculatively — this mutates state. Also, Item 21's hourly watch loop "
-    "(future) will auto-process email when the `email_auto_extract` flag is on; today that flag "
-    "defaults to OFF, so nothing auto-happens and process_email_now is the one way to run the "
-    "extractors from WhatsApp. "
+    "When NOT: NEVER call speculatively — this mutates state. The hourly watch loop below "
+    "auto-processes email when the `email_auto_extract` flag is on; today that flag defaults "
+    "to OFF, so nothing auto-happens and process_email_now is the one way to run the extractors "
+    "from WhatsApp without first flipping the flag. "
+    "\n\n"
+    "### add_email_watch / list_email_watches / delete_email_watch / enable_email_watch / disable_email_watch\n"
+    "What: a 'watch' is a saved filter on the inbox that ZOE evaluates in the background. "
+    "On each matching new email, ZOE hands the full message to the auto-extract pipeline "
+    "(receipts → expenses, iCal invites → agenda items). "
+    "When: the user says 'whenever a receipt arrives from receipt@shop.co.il, process it', "
+    "'watch for emails from the school about trips', or similar standing-rule phrasing. Pass "
+    "a short descriptive name and at least one of from_contains / subject_contains / "
+    "body_contains. Interval defaults to 60 min; override with interval_minutes for a tighter "
+    "cadence when it matters (e.g. shipping updates). Watches run against the auto-extract "
+    "flag — if the user has it disabled, the match is logged but no extraction happens. "
+    "When NOT: for a one-off 'read this specific email' use read_email / search_emails. "
+    "Managing: list_email_watches to show them, delete_email_watch / disable_email_watch to "
+    "stop one. These are household-wide (email isn't attributable to one sender). "
     "\n\n"
     "## Free-form answers and web search\n"
     "\n"
@@ -1448,6 +1480,80 @@ def _build_tools(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     },
                 },
                 "required": ["uid"],
+            },
+        },
+        {
+            "name": _ADD_EMAIL_WATCH,
+            "description": "Creates a background watch over the household inbox. The watch is "
+            "a declarative filter (match the sender, subject substring, or body substring); "
+            "ZOE evaluates it every interval_minutes (default 60) and, for each matching new "
+            "email, hands the full message to the auto-extract pipeline (receipt → expense, "
+            "iCal → agenda). Use for standing rules like 'whenever a receipt arrives from "
+            "receipt@shop.co.il, process it'.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Short human name for the watch, shown in list_email_watches.",
+                    },
+                    "from_contains": {
+                        "type": "string",
+                        "description": "Case-insensitive substring on the From address. Optional.",
+                    },
+                    "subject_contains": {
+                        "type": "string",
+                        "description": "Case-insensitive substring on the Subject. Optional.",
+                    },
+                    "body_contains": {
+                        "type": "string",
+                        "description": "Case-insensitive substring on the snippet / body preview. Optional.",
+                    },
+                    "interval_minutes": {
+                        "type": "integer",
+                        "description": "How often to check, in minutes. Default 60.",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+        {
+            "name": _LIST_EMAIL_WATCHES,
+            "description": "Lists all configured email watches with their filters and enabled state.",
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": _DELETE_EMAIL_WATCH,
+            "description": "Permanently removes an email watch by its id.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "The watch id from list_email_watches."},
+                },
+                "required": ["id"],
+            },
+        },
+        {
+            "name": _ENABLE_EMAIL_WATCH,
+            "description": "Enables a previously disabled email watch so it ticks again.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "The watch id."},
+                },
+                "required": ["id"],
+            },
+        },
+        {
+            "name": _DISABLE_EMAIL_WATCH,
+            "description": "Pauses an email watch without deleting it. The watch stays stored "
+            "and keeps its processed-UIDs memory; enable_email_watch resumes it.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "The watch id."},
+                },
+                "required": ["id"],
             },
         },
         {"type": "web_search_20250305", "name": "web_search", "max_uses": 3},

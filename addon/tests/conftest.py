@@ -26,6 +26,7 @@ _STORE_PATH_FIELDS = [
     "recurring_expenses_path",
     "check_ins_path",
     "personal_tasks_path",
+    "email_watches_path",
 ]
 
 

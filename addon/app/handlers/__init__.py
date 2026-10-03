@@ -15,6 +15,7 @@ from app.claude_agent import (
     CHECK_IN_TOOLS,
     CONVERSATION_TOOLS,
     EMAIL_TOOLS,
+    EMAIL_WATCH_TOOLS,
     EXPENSE_TOOLS,
     LIST_TOOLS,
     MEMORY_TOOLS,
@@ -29,6 +30,7 @@ from app.handlers.check_ins import _handle_check_in_call
 from app.handlers.conversation import _handle_conversation_call
 from app.handlers.devices import _handle_device_call
 from app.handlers.email import _handle_email_call
+from app.handlers.email_watch import _handle_email_watch_call
 from app.handlers.expenses import _handle_expense_call
 from app.handlers.lists import _handle_list_call
 from app.handlers.memory import _handle_memory_call
@@ -96,6 +98,13 @@ async def _wrap_email(sender, tool, inp, known_entities, pending_actions):
     return await _handle_email_call(sender, tool, inp)
 
 
+def _wrap_email_watch(sender, tool, inp, known_entities, pending_actions):
+    # Item 21: watch management is pure JSON-store CRUD — sync like the other
+    # per-store handlers. The watch LOOP is where the IMAP + processor work
+    # actually happens, out of band from the agent turn.
+    return _handle_email_watch_call(sender, tool, inp)
+
+
 def _build_dispatch_table() -> dict[str, HandlerFn]:
     """Fan out each tool-family set into a single {tool_name: handler} map so
     dispatch is one dict lookup instead of a chain of `in` tests."""
@@ -113,6 +122,7 @@ def _build_dispatch_table() -> dict[str, HandlerFn]:
         (CHECK_IN_TOOLS, _wrap_check_in),
         (PERSONAL_TASK_TOOLS, _wrap_personal_task),
         (EMAIL_TOOLS, _wrap_email),
+        (EMAIL_WATCH_TOOLS, _wrap_email_watch),
     ):
         for name in names:
             table[name] = fn

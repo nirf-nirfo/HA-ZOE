@@ -14,8 +14,8 @@ import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app import (
-    anchors, briefing, check_ins, expenses, inbound_tracker, monitors,
-    personal_tasks, recurring_expenses, scheduled_actions, senders,
+    anchors, briefing, check_ins, email_watches, expenses, inbound_tracker,
+    monitors, personal_tasks, recurring_expenses, scheduled_actions, senders,
 )
 from app import reminders as reminders_mod
 from app.settings import settings
@@ -30,6 +30,9 @@ _STARTUP_TS: float = time.time()
 _LOOP_NAMES = (
     "reminder", "monitor", "scheduled_action",
     "daily_briefing", "check_in", "meta_window",
+    # Item 21: email watch loop ticks every 60s; a stale heartbeat on /health
+    # or /admin/status is the earliest signal that the IMAP side has gone bad.
+    "email_watch",
 )
 _LOOP_HEARTBEAT: dict[str, dict[str, float | int]] = {
     name: {"last_tick_at": 0.0, "consecutive_errors": 0} for name in _LOOP_NAMES
@@ -180,6 +183,10 @@ async def admin_status() -> dict:
                 "next_fire_at": scheduled_actions.next_fire_at(),
             },
             "briefing": {"configured_senders": len(briefing.all_configs())},
+            "email_watches": {
+                "count": email_watches.count_all(),
+                "enabled": email_watches.count_enabled(),
+            },
         },
         "senders": {
             "allowed": sorted(_allowed_senders()),
