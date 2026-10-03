@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     email_imap_port: int = 993
     email_address: str = ""
     email_password: str = ""  # app password; never logged
+    # Item 20: when true, Item 21's hourly watch loop (future) auto-processes
+    # fetched email through the receipt + iCal extractors — expense rows get
+    # added and broadcast, calendar events get appended to the agenda. Default
+    # OFF so shipped behavior equals Item 19 (read-only email surface) until
+    # the user opts in. The manual `process_email_now(uid)` tool ignores this
+    # flag so the extractors can be smoke-tested from WhatsApp either way.
+    email_auto_extract: bool = False
     # Transcription server (Home Assistant Wyoming/Whisper). Overridable via the
     # add-on options (whisper_host / whisper_port) so an HA IP change doesn't
     # silently break voice transcription; defaults kept as a fallback.

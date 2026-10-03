@@ -29,6 +29,7 @@ options:
   email_imap_port: 993
   email_address: ""
   email_password: ""
+  email_auto_extract: false
 schema:
   anthropic_api_key: str
   ha_long_lived_token: str
@@ -48,4 +49,5 @@ schema:
   email_imap_port: int
   email_address: str
   email_password: password
+  email_auto_extract: bool
 homeassistant_api: true
