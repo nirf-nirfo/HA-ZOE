@@ -215,6 +215,9 @@ _LIST_AGENDA = "list_agenda"
 _REMOVE_AGENDA_ITEM = "remove_agenda_item"
 _SET_DAILY_BRIEFING = "set_daily_briefing"
 _SET_EVENING_BRIEFING = "set_evening_briefing"
+_LIST_HOUSEHOLD_MEMBERS = "list_household_members"
+_COPY_MY_BRIEFING_TO = "copy_my_briefing_to"
+_SET_BRIEFING_FOR = "set_briefing_for"
 
 _ADD_ANCHOR = "add_anchor"
 _LIST_ANCHORS = "list_anchors"
@@ -271,7 +274,12 @@ LIST_TOOLS = {_ADD_TO_LIST, _REMOVE_FROM_LIST, _CLEAR_LIST, _SHOW_LIST, _SHOW_AL
 MEMORY_TOOLS = {_REMEMBER, _FORGET}
 MONITOR_TOOLS = {_MONITOR_DEVICE, _LIST_MONITORS, _CANCEL_MONITOR}
 SCHEDULED_ACTION_TOOLS = {_SCHEDULE_ACTION, _LIST_SCHEDULED_ACTIONS, _CANCEL_SCHEDULED_ACTION}
-AGENDA_TOOLS = {_ADD_AGENDA_ITEM, _LIST_AGENDA, _REMOVE_AGENDA_ITEM, _SET_DAILY_BRIEFING, _SET_EVENING_BRIEFING}
+AGENDA_TOOLS = {
+    _ADD_AGENDA_ITEM, _LIST_AGENDA, _REMOVE_AGENDA_ITEM,
+    _SET_DAILY_BRIEFING, _SET_EVENING_BRIEFING,
+    # Item 23: cross-sender briefing management inside the household.
+    _LIST_HOUSEHOLD_MEMBERS, _COPY_MY_BRIEFING_TO, _SET_BRIEFING_FOR,
+}
 ANCHOR_TOOLS = {_ADD_ANCHOR, _LIST_ANCHORS, _REMOVE_ANCHOR, _SUPPRESS_ANCHOR}
 CONVERSATION_TOOLS = {_SEARCH_CONVERSATIONS}
 CHECK_IN_TOOLS = {_SCHEDULE_CHECK_IN, _LIST_CHECK_INS, _CANCEL_CHECK_IN}
@@ -493,6 +501,21 @@ TOOL_POLICY = (
     "When: 'send me the brief every morning at 7', 'move the evening brief to 21:30'. "
     "(See the YEARLY REMINDERS rule in the domain block for how yearly reminders surface — do "
     "not promise a 09:00 ping for them.) "
+    "\n\n"
+    "### list_household_members / copy_my_briefing_to / set_briefing_for\n"
+    "What: cross-sender briefing management. Briefing config is per-sender (every family member "
+    "keeps their own schedule), but you CAN set another household member's briefing on their "
+    "behalf when the current sender asks. "
+    "list_household_members returns the household's phones + resolved names so you know who "
+    "'my wife' or 'אשתי' is. copy_my_briefing_to clones the caller's full morning + evening "
+    "schedule onto the target (shortcut for 'set hers like mine'). set_briefing_for sets ONE "
+    "field (morning OR evening) on a specific household member to specific hour/minute/enabled. "
+    "When: the sender says 'set a morning brief for my wife', 'תזמיני לאשתי בריף בוקר כמו שלי', "
+    "'turn Nir's evening brief off'. Resolve the person they named → phone via memory facts "
+    "(same way sender names are already handled) or list_household_members first. "
+    "When NOT: for the sender's OWN schedule use set_daily_briefing / set_evening_briefing — "
+    "those don't need a target. Never target a phone that isn't in list_household_members — "
+    "the handler rejects outside targets. "
     "\n\n"
     "## Household lists\n"
     "\n"
@@ -868,6 +891,61 @@ def _build_tools(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "enabled": {"type": "boolean", "description": "True to turn it on, false to turn it off."},
                 },
                 "required": ["hour", "minute"],
+            },
+        },
+        {
+            "name": _LIST_HOUSEHOLD_MEMBERS,
+            "description": "Lists everyone in the household (configured via the add-on's "
+            "allowed_sender_numbers), with each person's phone and resolved name from memory. "
+            "Use this to translate 'my wife' / 'אשתי' / 'Nir' into the phone number that "
+            "copy_my_briefing_to and set_briefing_for require as target_sender.",
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": _COPY_MY_BRIEFING_TO,
+            "description": "Copies the CALLING sender's full briefing schedule — morning hour/"
+            "minute/enabled plus evening hour/minute/enabled — onto a target household member. "
+            "Shortcut for 'set hers like mine'. Target must be a phone from "
+            "list_household_members. Target's 'already sent today' dedup state is preserved so "
+            "the loop doesn't resend today's brief.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "target_sender": {
+                        "type": "string",
+                        "description": "The target household member's phone, exactly as it appears "
+                        "in list_household_members (digits only, no leading '+').",
+                    },
+                },
+                "required": ["target_sender"],
+            },
+        },
+        {
+            "name": _SET_BRIEFING_FOR,
+            "description": "Sets ONE briefing field (morning OR evening) for a specific household "
+            "member to specific hour/minute/enabled. Use for granular changes like 'turn Nir's "
+            "evening brief off' or 'move my wife's morning brief to 07:30'. Target must be a "
+            "phone from list_household_members.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "target_sender": {
+                        "type": "string",
+                        "description": "The target household member's phone from list_household_members.",
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": ["morning", "evening"],
+                        "description": "Which briefing to configure.",
+                    },
+                    "hour": {"type": "integer", "description": "Hour (0-23, Israel time)."},
+                    "minute": {"type": "integer", "description": "Minute (0-59)."},
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "True to turn this briefing on (default), false to turn it off.",
+                    },
+                },
+                "required": ["target_sender", "kind", "hour", "minute"],
             },
         },
         {
