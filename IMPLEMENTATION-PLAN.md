@@ -462,4 +462,4 @@ Never bump/deploy mid-phase.
 | 20 | 2026-10-03 | `c81cebe` | Email intelligence: receipt + iCal auto-extract behind `email_auto_extract` flag (default OFF) |
 | 21 | 2026-10-03 | `d0c3af9` | Email watch loop: hourly ticks, per-watch `interval_minutes` override, UID dedup |
 | 22 | — | — | queued (spam auto-triage: Haiku classifier + sender memory + user-set schedule + dry-run week → ~$2/mo runtime) |
-| 23 | 2026-10-07 | (this commit) | Cross-sender briefing: `list_household_members`, `copy_my_briefing_to`, `set_briefing_for` — household-membership-gated |
+| 23 | 2026-10-07 | `2a02917` | Cross-sender briefing: `list_household_members`, `copy_my_briefing_to`, `set_briefing_for` — household-membership-gated |
