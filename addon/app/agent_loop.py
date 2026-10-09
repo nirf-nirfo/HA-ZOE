@@ -96,6 +96,44 @@ def _prior_check_in_context(
     return "\n".join(lines)
 
 
+# Patterns the model historically emits when it means "I decided there's
+# nothing to send" — we've seen these in production even with explicit
+# instructions. Any match is treated as the model opting to stay silent.
+_SILENT_META_PATTERNS = (
+    "אין מה לשלוח",
+    "nothing to send",
+    "nothing to report",
+    "staying silent",
+    "stay silent",
+    "no update",
+    "אין עדכון",
+    "סריקה ללא",
+    "לא נמצא",
+)
+
+
+def _is_silent_sentinel(text: str) -> bool:
+    """True when the check-in model's final text is really 'stay silent'.
+
+    Covers two shapes:
+    1. The explicit `SILENT` sentinel from the framing (tolerant of trailing
+       punctuation and surrounding whitespace).
+    2. The paren-wrapped meta-commentary failure mode (`(אין מה לשלוח — ...)`,
+       `(nothing to send — ...)`, etc.) — if the whole text is wrapped in
+       parens AND contains one of the known silent-note phrases, it's a
+       narration of the stay-silent decision, not an actual message.
+    """
+    s = text.strip()
+    bare = s.strip("().[]{}!。.").strip().upper()
+    if bare in {"SILENT", "SILENTLY", "STAY SILENT", "STAY_SILENT"}:
+        return True
+    if s.startswith("(") and s.endswith(")"):
+        lower = s.lower()
+        if any(p in lower for p in _SILENT_META_PATTERNS):
+            return True
+    return False
+
+
 async def _run_check_in(
     sender: str,
     check_in_id: str,
@@ -113,10 +151,19 @@ async def _run_check_in(
     prior_block = f"\n\n{prior}" if prior else ""
     framing = (
         "[SCHEDULED CHECK-IN — invoked by ZOE's scheduler, not by the user.]\n"
-        f"You set up this check-in earlier. Follow this instruction to compose ONE natural "
-        f"WhatsApp message to send to the user NOW:\n\n{ci_prompt}{prior_block}\n\n"
-        "Read any state you need via read-only tools, then reply with the final message text; "
-        "it will be sent to the user verbatim."
+        "You set up this check-in earlier. Follow this instruction:\n\n"
+        f"{ci_prompt}{prior_block}\n\n"
+        "Read any state you need via read-only tools, then decide:\n"
+        "• If there IS something worth sending to the user right now, reply with "
+        "the final WhatsApp message text — it will be sent VERBATIM. Do NOT wrap "
+        "it in parentheses, do NOT prefix it with meta-commentary about your "
+        "reasoning or your scanning process. Just the message.\n"
+        "• If after reading state you decide there is NOTHING worth sending "
+        "(no update, nothing new, the condition in the instruction is not met), "
+        "reply with EXACTLY the single word SILENT and nothing else — no "
+        "parentheses, no explanation. The scheduler will skip the send. Do NOT "
+        "compose an 'אין מה לשלוח' / 'nothing to report' / 'staying silent' "
+        "message: SILENT is the way to stay silent."
     )
     context = initial_context(framing, states, sender)
     messages: list = [{"role": "user", "content": context}]
@@ -142,6 +189,9 @@ async def _run_check_in(
 
     if not final_text:
         logger.warning("Check-in produced no message for %s (prompt=%r)", sender, ci_prompt)
+        return
+    if _is_silent_sentinel(final_text):
+        logger.info("Check-in %s: model opted to stay silent", check_in_id)
         return
     await send_message(sender, final_text)
     # Record so a user follow-up ("done", "not yet") has short-term context to resolve against.
