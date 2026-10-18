@@ -461,5 +461,5 @@ Never bump/deploy mid-phase.
 | 19 | 2026-10-03 | `baf49a0` | Email foundation: `EmailBackend` protocol + IMAP + 3 read-only tools |
 | 20 | 2026-10-03 | `c81cebe` | Email intelligence: receipt + iCal auto-extract behind `email_auto_extract` flag (default OFF) |
 | 21 | 2026-10-03 | `d0c3af9` | Email watch loop: hourly ticks, per-watch `interval_minutes` override, UID dedup |
-| 22 | 2026-10-18 | (0.23.0) | Spam auto-triage: Haiku classifier (batched + cached) + sender memory + user-set schedule + mandatory dry-run week + hard safety switch |
+| 22 | 2026-10-18 | `07c96f7` | Spam auto-triage: Haiku classifier (batched + cached) + sender memory + user-set schedule + mandatory dry-run week + hard safety switch |
 | 23 | 2026-10-07 | `2a02917` | Cross-sender briefing: `list_household_members`, `copy_my_briefing_to`, `set_briefing_for` — household-membership-gated |
