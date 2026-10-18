@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app import (
     anchors, briefing, check_ins, email_watches, expenses, inbound_tracker,
+    spam_audit, spam_scan_schedule, spam_sender_memory,
     monitors, personal_tasks, recurring_expenses, scheduled_actions, senders,
 )
 from app import reminders as reminders_mod
@@ -33,6 +34,10 @@ _LOOP_NAMES = (
     # Item 21: email watch loop ticks every 60s; a stale heartbeat on /health
     # or /admin/status is the earliest signal that the IMAP side has gone bad.
     "email_watch",
+    # Item 22: spam scanner. Also 60s cadence but only acts inside the
+    # configured hour window + interval, so most ticks are no-ops that
+    # still bump the heartbeat.
+    "spam_scan",
 )
 _LOOP_HEARTBEAT: dict[str, dict[str, float | int]] = {
     name: {"last_tick_at": 0.0, "consecutive_errors": 0} for name in _LOOP_NAMES
@@ -186,6 +191,19 @@ async def admin_status() -> dict:
             "email_watches": {
                 "count": email_watches.count_all(),
                 "enabled": email_watches.count_enabled(),
+            },
+            "spam": {
+                "audit_count": spam_audit.count(),
+                "sender_memory_count": spam_sender_memory.count(),
+                "schedule": {
+                    "enabled": spam_scan_schedule.get_schedule().enabled,
+                    "dry_run": spam_scan_schedule.get_schedule().dry_run,
+                    "window": (
+                        f"{spam_scan_schedule.get_schedule().start_hour:02d}-"
+                        f"{spam_scan_schedule.get_schedule().end_hour:02d}"
+                    ),
+                    "interval_hours": spam_scan_schedule.get_schedule().interval_hours,
+                },
             },
         },
         "senders": {

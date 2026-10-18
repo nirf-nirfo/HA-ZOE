@@ -373,6 +373,129 @@ class ImapBackend:
     async def search(self, query: str, limit: int = 10) -> list[EmailMessage]:
         return await asyncio.to_thread(self._search_sync, query, limit)
 
+    # ---------------------------------------------------------- Item 22 writes
+    #
+    # The spam scanner needs to move messages to the provider's Spam folder.
+    # Writes stay gated at the SCANNER level by `settings.email_write_enabled`
+    # — the backend here just offers the primitives. Everything is MOVE (to
+    # Spam / Trash / arbitrary folder); hard-delete is deliberately not
+    # exposed. Spam-folder recovery on Gmail / Yahoo / iCloud is ~30 days,
+    # which is the safety margin that lets the scanner go live without a
+    # mistake becoming an unrecoverable mail loss.
+
+    def _detect_spam_folder_sync(self) -> str:
+        """Walks the server's folder list for a plausible Spam/Junk folder.
+        Returns the first match, else '' so the caller can fall back to the
+        explicit `email_spam_folder` setting (or report misconfig)."""
+        conn = None
+        try:
+            conn = self._connect_rw()
+            typ, data = conn.list()
+            if typ != "OK" or not data:
+                return ""
+            # Common provider spellings. Order matters — more specific first.
+            candidates = [
+                "[Gmail]/Spam", "[Google Mail]/Spam",
+                "Bulk Mail", "Bulk",       # Yahoo
+                "Junk", "Junk E-mail",     # iCloud / Outlook
+                "Spam",                    # generic
+            ]
+            available: list[str] = []
+            for row in data:
+                if row is None:
+                    continue
+                line = row.decode("utf-8", errors="replace") if isinstance(row, (bytes, bytearray)) else str(row)
+                # IMAP LIST reply is '(\\flag...) "/" "FolderName"'; a loose
+                # endswith is enough to pick the folder name reliably without
+                # a quoted-string parser.
+                available.append(line)
+            for cand in candidates:
+                for line in available:
+                    # Match on quoted name OR as a plain suffix after a space
+                    if f'"{cand}"' in line or line.rstrip().endswith(f" {cand}"):
+                        return cand
+            return ""
+        except Exception:
+            logger.exception("IMAP spam-folder detection failed")
+            return ""
+        finally:
+            self._close(conn)
+
+    def _connect_rw(self) -> imaplib.IMAP4_SSL:
+        """Like `_connect` but selects INBOX in read/write so STORE/COPY/EXPUNGE
+        succeed. Scanner-only; the read tools stay on the read-only session."""
+        self._reject_if_blank()
+        try:
+            conn = imaplib.IMAP4_SSL(self._host, self._port)
+            conn.login(self._address, self._password)
+            conn.select("INBOX", readonly=False)
+            return conn
+        except Exception:
+            logger.exception(
+                "IMAP connect(rw) failed host=%s address=%s",
+                self._host,
+                _mask_address(self._address),
+            )
+            raise
+
+    def _move_to_folder_sync(self, uid: str, folder: str) -> bool:
+        """Copy to `folder`, then mark the original \\Deleted and EXPUNGE.
+        Returns True on success. Tries IMAP MOVE first (RFC 6851) and falls
+        back to COPY+DELETE for servers that don't support it."""
+        if not uid or not folder:
+            return False
+        conn = None
+        try:
+            conn = self._connect_rw()
+            uid_b = uid.encode("ascii")
+            folder_q = f'"{folder}"'
+            # Prefer atomic MOVE where available.
+            try:
+                typ, _ = conn.uid("MOVE", uid, folder)  # type: ignore[attr-defined]
+                if typ == "OK":
+                    return True
+            except Exception:
+                pass
+            # Fallback: COPY + \\Deleted + EXPUNGE
+            typ, _ = conn.uid("COPY", uid, folder_q)
+            if typ != "OK":
+                logger.warning("IMAP COPY uid=%s -> %s returned %s", uid, folder, typ)
+                return False
+            typ, _ = conn.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+            if typ != "OK":
+                logger.warning("IMAP STORE +Deleted uid=%s returned %s", uid, typ)
+                return False
+            conn.expunge()
+            return True
+        except Exception:
+            logger.exception("IMAP move_to_folder uid=%s folder=%s failed", uid, folder)
+            return False
+        finally:
+            self._close(conn)
+
+    def _mark_read_sync(self, uid: str) -> bool:
+        if not uid:
+            return False
+        conn = None
+        try:
+            conn = self._connect_rw()
+            typ, _ = conn.uid("STORE", uid, "+FLAGS", "(\\Seen)")
+            return typ == "OK"
+        except Exception:
+            logger.exception("IMAP mark_read uid=%s failed", uid)
+            return False
+        finally:
+            self._close(conn)
+
+    async def detect_spam_folder(self) -> str:
+        return await asyncio.to_thread(self._detect_spam_folder_sync)
+
+    async def move_to_folder(self, uid: str, folder: str) -> bool:
+        return await asyncio.to_thread(self._move_to_folder_sync, uid, folder)
+
+    async def mark_read(self, uid: str) -> bool:
+        return await asyncio.to_thread(self._mark_read_sync, uid)
+
 
 def _extract_rfc822(msg_data: list[Any]) -> bytes | None:
     """imaplib returns a list of parts; the RFC822 body is the second

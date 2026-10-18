@@ -219,6 +219,19 @@ _LIST_HOUSEHOLD_MEMBERS = "list_household_members"
 _COPY_MY_BRIEFING_TO = "copy_my_briefing_to"
 _SET_BRIEFING_FOR = "set_briefing_for"
 
+# Item 22: spam auto-triage. The scanner itself runs on _spam_scan_loop; these
+# tools are the user-facing control surface (schedule, dry-run gate, audit log
+# review, sender memory teaching).
+_SET_SPAM_SCAN_SCHEDULE = "set_spam_scan_schedule"
+_SHOW_SPAM_SCAN_SCHEDULE = "show_spam_scan_schedule"
+_ENABLE_SPAM_SCAN = "enable_spam_scan"
+_DISABLE_SPAM_SCAN = "disable_spam_scan"
+_ENABLE_SPAM_LIVE_MODE = "enable_spam_live_mode"
+_DISABLE_SPAM_LIVE_MODE = "disable_spam_live_mode"
+_SHOW_SPAM_AUDIT = "show_spam_audit"
+_REMEMBER_SENDER_VERDICT = "remember_sender_verdict"
+_FORGET_SENDER_VERDICT = "forget_sender_verdict"
+
 _ADD_ANCHOR = "add_anchor"
 _LIST_ANCHORS = "list_anchors"
 _REMOVE_ANCHOR = "remove_anchor"
@@ -279,6 +292,16 @@ AGENDA_TOOLS = {
     _SET_DAILY_BRIEFING, _SET_EVENING_BRIEFING,
     # Item 23: cross-sender briefing management inside the household.
     _LIST_HOUSEHOLD_MEMBERS, _COPY_MY_BRIEFING_TO, _SET_BRIEFING_FOR,
+}
+
+# Item 22: spam-scanner control. Mutates the schedule and sender memory, so
+# deliberately NOT in CHECK_IN_ALLOWED_TOOLS — a scheduled check-in should
+# never silently reconfigure the scanner.
+SPAM_TOOLS = {
+    _SET_SPAM_SCAN_SCHEDULE, _SHOW_SPAM_SCAN_SCHEDULE,
+    _ENABLE_SPAM_SCAN, _DISABLE_SPAM_SCAN,
+    _ENABLE_SPAM_LIVE_MODE, _DISABLE_SPAM_LIVE_MODE,
+    _SHOW_SPAM_AUDIT, _REMEMBER_SENDER_VERDICT, _FORGET_SENDER_VERDICT,
 }
 ANCHOR_TOOLS = {_ADD_ANCHOR, _LIST_ANCHORS, _REMOVE_ANCHOR, _SUPPRESS_ANCHOR}
 CONVERSATION_TOOLS = {_SEARCH_CONVERSATIONS}
@@ -632,6 +655,22 @@ TOOL_POLICY = (
     "Managing: list_email_watches to show them, delete_email_watch / disable_email_watch to "
     "stop one. These are household-wide (email isn't attributable to one sender). "
     "\n\n"
+    "### set_spam_scan_schedule / show_spam_scan_schedule / enable_spam_scan / disable_spam_scan / "
+    "enable_spam_live_mode / disable_spam_live_mode / show_spam_audit / remember_sender_verdict / "
+    "forget_sender_verdict\n"
+    "What: Item 22's spam auto-triage. A background scanner wakes up inside a user-configured "
+    "window (e.g. 08–20 every 2h), classifies new email with Haiku, and auto-moves confident "
+    "spam to the provider's Spam folder (recoverable ~30 days). Ships in DRY-RUN mode: it logs "
+    "what it WOULD move to the audit log but doesn't actually move anything until the user says "
+    "'go live' / 'enable_spam_live_mode'. The classifier short-circuits on allowlist matches "
+    "(from `email_spam_allowlist` option) and on learned per-sender verdicts. "
+    "When: 'סרקי ספאם בין 8 ל-20 כל שעתיים' → set_spam_scan_schedule. 'מה המצב של סורק הספאם?' → "
+    "show_spam_scan_schedule. 'מה סינונת לי השבוע?' → show_spam_audit. 'תעבירי לספאם לייב, "
+    "ראיתי את האודיט' → enable_spam_live_mode. 'תמיד ספאם מ-promos@shop.com' → "
+    "remember_sender_verdict. 'תפסיקי להעביר מיילים' → disable_spam_live_mode. "
+    "Private per-sender reply (don't broadcast). Settings `email_write_enabled` must be true in "
+    "the HA UI for any live move to actually happen; dry-run runs regardless. "
+    "\n\n"
     "## Free-form answers and web search\n"
     "\n"
     "For anything not about a known device, reminder, list, expense, agenda, anchor, task, "
@@ -946,6 +985,101 @@ def _build_tools(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     },
                 },
                 "required": ["target_sender", "kind", "hour", "minute"],
+            },
+        },
+        {
+            "name": _SET_SPAM_SCAN_SCHEDULE,
+            "description": "Configures when the spam scanner is allowed to run. Household-wide "
+            "(email isn't per-sender). Window is start_hour..end_hour local Jerusalem time; "
+            "the scanner wakes up every interval_hours INSIDE that window. Use for: 'סרקי "
+            "ספאם בין 8 ל-20 כל שעתיים', 'scan every 3 hours between 9 and 21'.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "start_hour": {"type": "integer", "description": "0-23, inclusive."},
+                    "end_hour": {"type": "integer", "description": "1-24, exclusive; must be > start_hour."},
+                    "interval_hours": {"type": "integer", "description": ">= 1."},
+                },
+                "required": ["start_hour", "end_hour", "interval_hours"],
+            },
+        },
+        {
+            "name": _SHOW_SPAM_SCAN_SCHEDULE,
+            "description": "Reports the current spam-scan schedule: window, interval, last scan "
+            "time, and whether the scanner is in dry-run (audit only) or live (will actually "
+            "move spam) mode.",
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": _ENABLE_SPAM_SCAN,
+            "description": "Enables the spam-scan loop (schedule stays as configured).",
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": _DISABLE_SPAM_SCAN,
+            "description": "Disables the spam-scan loop entirely. No scans run until re-enabled.",
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": _ENABLE_SPAM_LIVE_MODE,
+            "description": "⚠️ Flips the spam scanner from DRY-RUN (audit log only) to LIVE "
+            "(actually moves confident spam to the Spam folder). Only call this when the user "
+            "has explicitly reviewed the dry-run audit (`show_spam_audit`) and told you to go "
+            "live. Spam-folder moves are recoverable for ~30 days on Gmail/Yahoo/iCloud, so a "
+            "mistake isn't catastrophic — but still, require clear user intent.",
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": _DISABLE_SPAM_LIVE_MODE,
+            "description": "Flips the spam scanner back to DRY-RUN (audit only). Kill switch if "
+            "something looks wrong after going live. Use when the user says 'stop moving email', "
+            "'back to dry run', 'הפסיקי להעביר מיילים'.",
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": _SHOW_SPAM_AUDIT,
+            "description": "Lists what the scanner did (or would have done, in dry-run) over "
+            "the last `days` days. Review this during the dry-run week to decide whether to "
+            "flip to live, and periodically after going live to catch misclassifications.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "days": {
+                        "type": "integer",
+                        "description": "How many days of history to show (default 7, max 30).",
+                    },
+                },
+            },
+        },
+        {
+            "name": _REMEMBER_SENDER_VERDICT,
+            "description": "Teaches the scanner's sender memory: an exact sender address is "
+            "always `spam` or always `legit`. Future scans short-circuit (no LLM call) for this "
+            "sender. Use when the user says 'always treat email from X as spam' / 'mom's email "
+            "is always legit, don't ask'.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "sender": {"type": "string", "description": "The sender email, exactly."},
+                    "verdict": {
+                        "type": "string",
+                        "enum": ["spam", "legit"],
+                        "description": "'spam' auto-moves on next scan; 'legit' always leaves alone.",
+                    },
+                },
+                "required": ["sender", "verdict"],
+            },
+        },
+        {
+            "name": _FORGET_SENDER_VERDICT,
+            "description": "Removes a learned sender verdict so the classifier decides again "
+            "next time. Use when the user says 'reset what you know about X'.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "sender": {"type": "string", "description": "The sender email, exactly."},
+                },
+                "required": ["sender"],
             },
         },
         {

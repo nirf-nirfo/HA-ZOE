@@ -23,6 +23,7 @@ from app.claude_agent import (
     PERSONAL_TASK_TOOLS,
     REMINDER_TOOLS,
     SCHEDULED_ACTION_TOOLS,
+    SPAM_TOOLS,
 )
 from app.handlers.agenda import _handle_agenda_call
 from app.handlers.anchors import _handle_anchor_call
@@ -38,6 +39,7 @@ from app.handlers.monitors import _handle_monitor_call
 from app.handlers.personal_tasks import _handle_personal_task_call
 from app.handlers.reminders import _handle_reminder_call
 from app.handlers.scheduled_actions import _handle_scheduled_action_call
+from app.handlers.spam import _handle_spam_call
 
 
 HandlerFn = Callable[..., "str | Awaitable[str]"]
@@ -98,6 +100,13 @@ async def _wrap_email(sender, tool, inp, known_entities, pending_actions):
     return await _handle_email_call(sender, tool, inp)
 
 
+def _wrap_spam(sender, tool, inp, known_entities, pending_actions):
+    # Item 22: pure JSON-store CRUD + the dry-run / live toggle. All work
+    # against the live inbox happens asynchronously on `_spam_scan_loop`;
+    # this handler never touches IMAP, so it stays sync like other stores.
+    return _handle_spam_call(sender, tool, inp)
+
+
 def _wrap_email_watch(sender, tool, inp, known_entities, pending_actions):
     # Item 21: watch management is pure JSON-store CRUD — sync like the other
     # per-store handlers. The watch LOOP is where the IMAP + processor work
@@ -123,6 +132,7 @@ def _build_dispatch_table() -> dict[str, HandlerFn]:
         (PERSONAL_TASK_TOOLS, _wrap_personal_task),
         (EMAIL_TOOLS, _wrap_email),
         (EMAIL_WATCH_TOOLS, _wrap_email_watch),
+        (SPAM_TOOLS, _wrap_spam),
     ):
         for name in names:
             table[name] = fn

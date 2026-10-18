@@ -27,6 +27,9 @@ _STORE_PATH_FIELDS = [
     "check_ins_path",
     "personal_tasks_path",
     "email_watches_path",
+    "spam_scan_schedule_path",
+    "spam_sender_memory_path",
+    "spam_audit_path",
 ]
 
 

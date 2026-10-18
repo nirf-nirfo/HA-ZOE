@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from app import (
     agenda, anchors, briefing, check_ins, email_watches, inbound_tracker,
     monitors, recurring_expenses, scheduled_actions, senders,
+    spam_scan_schedule, spam_scanner,
 )
 from app.agent_loop import _allowed_senders, _run_check_in
 from app.briefing_compile import _compile_evening_briefing, _compile_morning_briefing
@@ -20,6 +21,7 @@ from app.ha_client import ha_client
 from app.handlers.scheduled_actions import _auto_turn_off_later, _execute_control_action
 from app.logging_config import logger
 from app.reminders import pop_due
+from app.settings import settings
 from app.status import _beat
 from app.whatsapp import send_message
 
@@ -309,6 +311,47 @@ async def _email_watch_loop() -> None:
                 )
 
 
+async def _spam_scan_loop() -> None:
+    """Item 22: spam auto-triage. Ticks every 60s; actually scans only when
+    the configured time window AND interval allow it. The scanner itself
+    enforces the dry-run gate — this loop is just the cadence.
+    """
+    while True:
+        await asyncio.sleep(60)
+        _beat("spam_scan")
+        try:
+            schedule = spam_scan_schedule.get_schedule()
+        except Exception:
+            _beat("spam_scan", ok=False)
+            logger.exception("Spam scan loop: schedule load failed")
+            continue
+        if not schedule.enabled:
+            continue
+        now = datetime.now(timezone.utc)
+        if not spam_scan_schedule.within_window(now, schedule):
+            continue
+        # Interval gate: don't rescan more often than `interval_hours`.
+        if schedule.last_scan_at:
+            next_due = schedule.last_scan_at + schedule.interval_hours * 3600
+            if time.time() < next_due:
+                continue
+        if not settings.email_address or not settings.email_password:
+            # Email not configured — skip silently so a brand-new deploy
+            # doesn't fill the log with configuration errors every tick.
+            continue
+        try:
+            outcome = await spam_scanner.run_scan(_email_backend)
+            logger.info(
+                "Spam scan: scanned=%d memory_hits=%d allowlisted=%d "
+                "classified=%d moved=%d dry_run=%s",
+                outcome.scanned, outcome.memory_hits, outcome.allowlisted,
+                outcome.classified, outcome.moved, outcome.dry_run,
+            )
+        except Exception:
+            _beat("spam_scan", ok=False)
+            logger.exception("Spam scan loop: run_scan failed")
+
+
 async def _reminder_loop() -> None:
     while True:
         await asyncio.sleep(60)
@@ -340,3 +383,6 @@ def spawn_loops() -> None:
     # Item 21: hourly inbox watches. Base cadence 60s with per-watch
     # interval_minutes gating; see `_email_watch_loop` for the full contract.
     asyncio.create_task(_email_watch_loop())
+    # Item 22: spam auto-triage. Base cadence 60s with time-of-day + interval
+    # gating; mutations gated by email_write_enabled + schedule.dry_run.
+    asyncio.create_task(_spam_scan_loop())

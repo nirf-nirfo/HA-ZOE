@@ -34,6 +34,24 @@ class Settings(BaseSettings):
     check_ins_path: str = "/data/check_ins.json"
     personal_tasks_path: str = "/data/personal_tasks.json"
     inbound_tracker_path: str = "/data/inbound_tracker.json"
+    # Item 22: spam auto-triage. Schedule, learned sender verdicts, audit log.
+    spam_scan_schedule_path: str = "/data/spam_scan_schedule.json"
+    spam_sender_memory_path: str = "/data/spam_sender_memory.json"
+    spam_audit_path: str = "/data/spam_audit.json"
+    # Hard safety switch: the scanner may NEVER move email when this is False,
+    # regardless of the per-row dry_run flag. Default off; the user opts in
+    # via the HA UI only after reviewing the dry-run audit log.
+    email_write_enabled: bool = False
+    # Blank → auto-detect ([Gmail]/Spam, Yahoo "Bulk Mail", iCloud "Junk", etc).
+    # Set explicitly only if auto-detect returns the wrong folder.
+    email_spam_folder: str = ""
+    # Comma-separated case-insensitive substrings. Any email whose From matches
+    # any pattern is left alone regardless of classifier verdict — the escape
+    # hatch for a bank / school / known-good sender the classifier might flag.
+    email_spam_allowlist: str = ""
+    # Overridable classifier model. Haiku 4.5 is the cost-optimised default
+    # — switch to a Sonnet if Haiku misbehaves on the household's actual mail.
+    email_spam_classifier_model: str = "claude-haiku-4-5"
     # Item 19: read-only email access via IMAP + an app password. Items 20/21
     # (receipt / iCal auto-extract, hourly watch loop) build on this. Blank
     # address / password means "email not configured" and the tools short-
