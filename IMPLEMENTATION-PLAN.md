@@ -530,7 +530,7 @@ Never bump/deploy mid-phase.
 | 21 | 2026-10-03 | `d0c3af9` | Email watch loop: hourly ticks, per-watch `interval_minutes` override, UID dedup |
 | 22 | 2026-10-18 | `07c96f7` | Spam auto-triage: Haiku classifier (batched + cached) + sender memory + user-set schedule + mandatory dry-run week + hard safety switch |
 | 23 | 2026-10-07 | `2a02917` | Cross-sender briefing: `list_household_members`, `copy_my_briefing_to`, `set_briefing_for` — household-membership-gated |
-| 24 | 2026-11-15 | (0.24.0) | Grocery app integration: pairing via code exchange, 8 agent tools, API client with idempotency + pairing-loss recovery |
+| 24 | 2026-11-15 | `8594c15` | Grocery app integration: pairing via code exchange, 8 agent tools, API client with idempotency + pairing-loss recovery |
 | 25 | — | — | queued (completed-trip export + expense integration with provisional flag + amount-correction support) |
 | 26 | — | — | queued (smart dedup read-before-write + pre-shopping suggestions) |
 | 27 | — | — | queued (trip summary WhatsApp message, actual-vs-estimate preserved) |
