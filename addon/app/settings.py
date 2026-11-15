@@ -52,6 +52,13 @@ class Settings(BaseSettings):
     # Overridable classifier model. Haiku 4.5 is the cost-optimised default
     # — switch to a Sonnet if Haiku misbehaves on the household's actual mail.
     email_spam_classifier_model: str = "claude-haiku-4-5"
+    # Item 24: grocery-app integration. Base URL of the Cloudflare Worker that
+    # serves the household's grocery list. Overridable so dev/staging deploys
+    # can point elsewhere without touching code. The paired token lives
+    # outside settings — in /data via grocery_secret.py — so rotation doesn't
+    # require a restart.
+    grocery_base_url: str = "https://grocery-list.nirflax1984.workers.dev"
+    grocery_secret_path: str = "/data/grocery_secret.json"
     # Item 19: read-only email access via IMAP + an app password. Items 20/21
     # (receipt / iCal auto-extract, hourly watch loop) build on this. Blank
     # address / password means "email not configured" and the tools short-

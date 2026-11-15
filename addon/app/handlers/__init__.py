@@ -24,6 +24,7 @@ from app.claude_agent import (
     REMINDER_TOOLS,
     SCHEDULED_ACTION_TOOLS,
     SPAM_TOOLS,
+    GROCERY_TOOLS,
 )
 from app.handlers.agenda import _handle_agenda_call
 from app.handlers.anchors import _handle_anchor_call
@@ -40,6 +41,7 @@ from app.handlers.personal_tasks import _handle_personal_task_call
 from app.handlers.reminders import _handle_reminder_call
 from app.handlers.scheduled_actions import _handle_scheduled_action_call
 from app.handlers.spam import _handle_spam_call
+from app.handlers.grocery import _handle_grocery_call
 
 
 HandlerFn = Callable[..., "str | Awaitable[str]"]
@@ -100,6 +102,11 @@ async def _wrap_email(sender, tool, inp, known_entities, pending_actions):
     return await _handle_email_call(sender, tool, inp)
 
 
+async def _wrap_grocery(sender, tool, inp, known_entities, pending_actions):
+    # Item 24: grocery API client is async (httpx), mirror _wrap_email's shape.
+    return await _handle_grocery_call(sender, tool, inp)
+
+
 def _wrap_spam(sender, tool, inp, known_entities, pending_actions):
     # Item 22: pure JSON-store CRUD + the dry-run / live toggle. All work
     # against the live inbox happens asynchronously on `_spam_scan_loop`;
@@ -133,6 +140,7 @@ def _build_dispatch_table() -> dict[str, HandlerFn]:
         (EMAIL_TOOLS, _wrap_email),
         (EMAIL_WATCH_TOOLS, _wrap_email_watch),
         (SPAM_TOOLS, _wrap_spam),
+        (GROCERY_TOOLS, _wrap_grocery),
     ):
         for name in names:
             table[name] = fn

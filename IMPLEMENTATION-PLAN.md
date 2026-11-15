@@ -382,6 +382,73 @@ Builds on Items 19–21. Teaches ZOE to triage spam in the household inbox on a 
 
 ---
 
+## Phase F — Grocery-app integration ("הקניות שלנו")
+
+Shared Cloudflare Worker that serves the household grocery list. ZOE talks to it over a dedicated assistant API using a token obtained via one-time pairing (`/api/zoe/exchange` with a 10-char code from the app's הגדרות screen). Pairing is one-use / 10-min / locks after 5 wrong attempts. Pairing rotates the token; the user can revoke in the app and the API returns 404 while unpaired. Idempotency-Key required on every mutating op (8-80 chars).
+
+Staged sequencing per user decision 2026-11-15: ship each stage on its own before the next.
+
+### [x] Item 24 — Core integration
+**Branch:** main (inline)
+
+- `grocery_client.py` — httpx client. `exchange_code`, `get_list`, `get_history`, `apply_op`. Never sets Origin header. Translates 401/404 on paired calls into a pairing error so the handler can clear local state and prompt re-pair.
+- `grocery_secret.py` — token storage under `/data/grocery_secret.json`, atomic rename on write, module-level cache so the token hits disk once per process. Token never appears in logs or tool responses.
+- `grocery_idempotency.py` — deterministic key derivation from `(sender, op, utc_minute)`. Documented tradeoff: retries within a minute dedup cleanly server-side; retries crossing a minute could duplicate (Item 26's read-before-write guard covers this).
+- 8 agent tools (`GROCERY_TOOLS`): `pair_grocery`, `unpair_grocery`, `grocery_pairing_status`, `show_grocery_list`, `add_grocery_item`, `remove_grocery_item`, `mark_grocery_bought`, `update_grocery_item`. `show_grocery_list` is read-only and safe; others mutate household state so stay out of `CHECK_IN_ALLOWED_TOOLS`.
+- System prompt block teaches the Hebrew intent rules: 'כבר קניתי X' = mark_grocery_bought (NOT remove); 'מחק X' = remove_grocery_item; multiple items in one message = separate tool calls; resolve name → id via show_grocery_list first.
+- New setting `grocery_base_url`, exposed in HA options and exported via `run.sh`. Token is NOT a setting — pairing happens at runtime via WhatsApp.
+- Admin status reports `paired: bool` (no token leak).
+- 50 new tests across 4 test files (secret, idempotency, client with mocked httpx, handler dispatch).
+
+### [ ] Item 25 — Completed-trip export + expense integration
+**Risk:** medium (writes to household expense ledger). **Branch:** `step-25-grocery-expense`
+
+Builds on `get_history()` already implemented in Item 24.
+
+- New loop `_grocery_trip_import_loop` in `loops.py` (hourly cadence, heartbeat on `/admin/status` under `grocery_trip_import`).
+- New store `grocery_trip_cursor.py` — persistent cursor (last processed trip id + last processed `endedAt`). Must survive add-on restarts. The server retains only 50 latest trips so the cursor MUST NOT be purely count-based — poll frequently enough to catch new trips before they roll off.
+- Processed-trip ledger: `grocery_trip_processed.py` — stable trip ids already imported. Idempotency across loop restarts.
+- On a newly-seen completed trip:
+  - Compute `paidAgorot` (server-provided) and compare to `estimateAgorot`. If any item has `actualAgorot is None`, the total is mixed → log it as "provisional" (new field on `expenses.Expense`). If `expenses` doesn't support provisional, extend it rather than labeling mixed estimates as verified.
+  - Call `expenses.add(sender=<primary household alias>, amount=paidAgorot/100, category="סופר", payment_method="?", description=f"קניות {storeId} ({len(items)} פריטים)", date=<endedAt as Asia/Jerusalem YYYY-MM-DD>, source="grocery_trip")`.
+  - Record trip_id → expense_id so a later correction updates the expense rather than creating another one.
+- If a trip's `paidAgorot` changes later (user entered actual prices after close), `update_last_amount` on the existing expense — do NOT add a new row.
+- Tests: cursor persistence; idempotency across restarts; provisional-flag path; amount-correction path; cursor advance across 50-trip boundary.
+
+### [ ] Item 26 — Smart dedup + pre-shopping suggestions
+**Risk:** low. **Branch:** `step-26-grocery-smart`
+
+- Read-before-write guard: `add_grocery_item` first calls `get_list`, runs a name-equivalence check (lowercased + whitespace-collapsed + Hebrew/English normalized), and if a match exists, ASKS the user whether to bump the quantity or add a separate row. Preserves meaningful differences (brand, size, dietary).
+- Pre-shopping intent detection: "אני יוצא לקניות" / "going shopping" → pull unresolved `missing:true` items + top-N items from past purchases (from the trip-processed ledger Item 25 built) that haven't appeared on the current list → **suggest only, don't add** without user "כן".
+- Tests: equivalence matching (חלב vs "חלב תנובה" vs "milk"); quantity-bump flow; suggestion flow doesn't auto-add.
+
+### [ ] Item 27 — Trip summary message
+**Risk:** low. **Branch:** `step-27-grocery-summary`
+
+- On a newly-processed completed trip (from Item 25's loop), compose ONE concise Hebrew WhatsApp summary: total paid, items not found (`found: false`), remaining budget (if `budgetAgorot` configured).
+- Preserve Item 25's actual-vs-estimate rules: the message explicitly marks mixed totals as provisional.
+- Dedup by trip id (don't send twice if the loop retries).
+
+### [ ] Item 28 — Replenishment forecasting
+**Risk:** medium (noisy predictions = ignored reminders). **Branch:** `step-28-grocery-forecast`
+
+- New store `grocery_purchase_history.py` — per-product/product-family purchase events from completed trips (date, quantity, pack size signal from name). Durable across the 50-trip server limit.
+- Simple interval model (start explainable: median days between consecutive purchases of the same canonical product). Confidence grows with sample size (4+ purchases before any forecast). With sparse history, withhold.
+- Daily batched reminder loop: at most ONE WhatsApp message per day with high-confidence predictions ("עשוי להיגמר: חלב, לחם"). Phrasing: "may be running low," NOT "you're out of." Never auto-adds.
+- Learning from replies: "we still have some" / "already ran out" / "bought elsewhere" / "we stopped buying this" → adjust or pause the relevant prediction via new tools (`grocery_forecast_feedback`).
+- Tests: isolated fixtures for sparse history, bulk purchases, missing items, substitutions, corrections, duplicate event delivery. No live-data fabrication.
+
+### Phase F cross-cutting constraints
+
+- Household sender allowlist — reuses the existing `_allowed_senders()` check (tool dispatch is already gated).
+- Persistent retry-safe idempotency on both the request key AND the processed-trip ledger.
+- Never treat estimates as verified spend.
+- Never fabricate live trips/expenses — tests use isolated fixtures.
+- No new paid services.
+- All scheduled work runs on ZOE's own loops; no dependency on external triggers.
+
+---
+
 ## Budget summary
 
 | Item | Budget | Cumulative |
@@ -463,3 +530,8 @@ Never bump/deploy mid-phase.
 | 21 | 2026-10-03 | `d0c3af9` | Email watch loop: hourly ticks, per-watch `interval_minutes` override, UID dedup |
 | 22 | 2026-10-18 | `07c96f7` | Spam auto-triage: Haiku classifier (batched + cached) + sender memory + user-set schedule + mandatory dry-run week + hard safety switch |
 | 23 | 2026-10-07 | `2a02917` | Cross-sender briefing: `list_household_members`, `copy_my_briefing_to`, `set_briefing_for` — household-membership-gated |
+| 24 | 2026-11-15 | (0.24.0) | Grocery app integration: pairing via code exchange, 8 agent tools, API client with idempotency + pairing-loss recovery |
+| 25 | — | — | queued (completed-trip export + expense integration with provisional flag + amount-correction support) |
+| 26 | — | — | queued (smart dedup read-before-write + pre-shopping suggestions) |
+| 27 | — | — | queued (trip summary WhatsApp message, actual-vs-estimate preserved) |
+| 28 | — | — | queued (replenishment forecasting, daily batched, learns from corrections) |

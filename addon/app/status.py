@@ -14,7 +14,8 @@ import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app import (
-    anchors, briefing, check_ins, email_watches, expenses, inbound_tracker,
+    anchors, briefing, check_ins, email_watches, expenses, grocery_secret,
+    inbound_tracker,
     spam_audit, spam_scan_schedule, spam_sender_memory,
     monitors, personal_tasks, recurring_expenses, scheduled_actions, senders,
 )
@@ -192,6 +193,7 @@ async def admin_status() -> dict:
                 "count": email_watches.count_all(),
                 "enabled": email_watches.count_enabled(),
             },
+            "grocery": {"paired": grocery_secret.is_paired()},
             "spam": {
                 "audit_count": spam_audit.count(),
                 "sender_memory_count": spam_sender_memory.count(),

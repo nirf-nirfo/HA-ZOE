@@ -1,5 +1,5 @@
 name: "ZOE"
-version: "0.23.0"
+version: "0.24.0"
 slug: "zoe_ha_bridge"
 description: "WhatsApp-controlled Home Assistant assistant powered by Claude"
 arch:
@@ -34,6 +34,7 @@ options:
   email_spam_folder: ""
   email_spam_allowlist: ""
   email_spam_classifier_model: "claude-haiku-4-5"
+  grocery_base_url: "https://grocery-list.nirflax1984.workers.dev"
 schema:
   anthropic_api_key: str
   ha_long_lived_token: str
@@ -58,4 +59,5 @@ schema:
   email_spam_folder: str
   email_spam_allowlist: str
   email_spam_classifier_model: str
+  grocery_base_url: str
 homeassistant_api: true

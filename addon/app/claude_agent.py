@@ -232,6 +232,18 @@ _SHOW_SPAM_AUDIT = "show_spam_audit"
 _REMEMBER_SENDER_VERDICT = "remember_sender_verdict"
 _FORGET_SENDER_VERDICT = "forget_sender_verdict"
 
+# Item 24: grocery-app integration tools. Pairing + list CRUD against the
+# household's shared grocery Worker. All mutating ops carry a derived
+# idempotency key so the model's self-retries dedup server-side cleanly.
+_PAIR_GROCERY = "pair_grocery"
+_UNPAIR_GROCERY = "unpair_grocery"
+_GROCERY_PAIRING_STATUS = "grocery_pairing_status"
+_SHOW_GROCERY_LIST = "show_grocery_list"
+_ADD_GROCERY_ITEM = "add_grocery_item"
+_REMOVE_GROCERY_ITEM = "remove_grocery_item"
+_MARK_GROCERY_BOUGHT = "mark_grocery_bought"
+_UPDATE_GROCERY_ITEM = "update_grocery_item"
+
 _ADD_ANCHOR = "add_anchor"
 _LIST_ANCHORS = "list_anchors"
 _REMOVE_ANCHOR = "remove_anchor"
@@ -302,6 +314,16 @@ SPAM_TOOLS = {
     _ENABLE_SPAM_SCAN, _DISABLE_SPAM_SCAN,
     _ENABLE_SPAM_LIVE_MODE, _DISABLE_SPAM_LIVE_MODE,
     _SHOW_SPAM_AUDIT, _REMEMBER_SENDER_VERDICT, _FORGET_SENDER_VERDICT,
+}
+
+# Item 24: grocery tools. show_grocery_list is read-only and SAFE for
+# check-ins; everything else mutates shared household state (and some touch
+# a secret, like pair/unpair) — those stay OUT of CHECK_IN_ALLOWED_TOOLS.
+GROCERY_TOOLS = {
+    _PAIR_GROCERY, _UNPAIR_GROCERY, _GROCERY_PAIRING_STATUS,
+    _SHOW_GROCERY_LIST,
+    _ADD_GROCERY_ITEM, _REMOVE_GROCERY_ITEM,
+    _MARK_GROCERY_BOUGHT, _UPDATE_GROCERY_ITEM,
 }
 ANCHOR_TOOLS = {_ADD_ANCHOR, _LIST_ANCHORS, _REMOVE_ANCHOR, _SUPPRESS_ANCHOR}
 CONVERSATION_TOOLS = {_SEARCH_CONVERSATIONS}
@@ -670,6 +692,31 @@ TOOL_POLICY = (
     "remember_sender_verdict. 'תפסיקי להעביר מיילים' → disable_spam_live_mode. "
     "Private per-sender reply (don't broadcast). Settings `email_write_enabled` must be true in "
     "the HA UI for any live move to actually happen; dry-run runs regardless. "
+    "\n\n"
+    "## Grocery list (shared household)\n"
+    "\n"
+    "### pair_grocery / unpair_grocery / grocery_pairing_status / show_grocery_list / "
+    "add_grocery_item / remove_grocery_item / mark_grocery_bought / update_grocery_item\n"
+    "What: ZOE integrates with the household's 'הקניות שלנו' grocery app over its assistant API. "
+    "Pairing is one-time: the user opens the app → הגדרות → 'צור קוד חיבור', gets a 10-character "
+    "code, sends it to ZOE, and ZOE calls pair_grocery with that code. The code is one-use and "
+    "expires in 10 minutes; the 5th wrong try locks it, so do NOT auto-retry a rejected code — "
+    "ask for a fresh one. "
+    "When: 'תוסיף חלב וביצים לרשימה' → one add_grocery_item per product, separate calls. "
+    "'תראה לי את הרשימה' / 'מה יש לנו ברשימה?' → show_grocery_list. "
+    "'כבר קניתי את החלב' / 'סמן את החלב כקנוי' → fetch the list, resolve 'חלב' to its id, "
+    "mark_grocery_bought(id). 'מחק את החלב' / 'תוריד את החלב' → remove_grocery_item(id). "
+    "'שנה את הכמות של החלב ל-3' → update_grocery_item. "
+    "Critical distinction: 'כבר קנינו X' / 'סמן X' means CHECKED (mark_grocery_bought), NOT "
+    "removed. removeItem is only for explicit delete intent (מחק, הסר, תוריד). "
+    "Resolving names to ids: if the user names a product rather than an id, call "
+    "show_grocery_list first, find the matching row, then call the mutation with its id. If the "
+    "name doesn't match any list row, tell the user and ASK rather than guess. "
+    "Reply privately to the sender who asked (don't broadcast). Multiple items in one message "
+    "= separate tool calls, each with its own op; the handler derives the idempotency key so "
+    "retries are safe. "
+    "Allowlist: only accept grocery commands from household senders (same allowlist as everything "
+    "else — enforced upstream). "
     "\n\n"
     "## Free-form answers and web search\n"
     "\n"
@@ -1080,6 +1127,99 @@ def _build_tools(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "sender": {"type": "string", "description": "The sender email, exactly."},
                 },
                 "required": ["sender"],
+            },
+        },
+        {
+            "name": _PAIR_GROCERY,
+            "description": "One-time pairing with the household grocery app ('הקניות שלנו'). The "
+            "user opens the app → הגדרות → 'צור קוד חיבור' → gets a 10-char code → sends it here. "
+            "Call this with that code. Codes are one-use, expire in 10 minutes, and 5 wrong "
+            "attempts locks the flow — on a rejection ASK FOR A FRESH CODE, do not retry.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string", "description": "The 10-character pairing code."},
+                },
+                "required": ["code"],
+            },
+        },
+        {
+            "name": _UNPAIR_GROCERY,
+            "description": "Removes the stored grocery-app token. Use when the user explicitly "
+            "says 'תנתקי מהרשימה' / 'unpair the grocery list'.",
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": _GROCERY_PAIRING_STATUS,
+            "description": "Reports whether the grocery app is currently paired. No secrets ever.",
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": _SHOW_GROCERY_LIST,
+            "description": "Fetches the current grocery list — item names, quantities, checked "
+            "state, and ids. Use before any mark/remove/update when the user names a product "
+            "instead of an id, so you can resolve name → id.",
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": _ADD_GROCERY_ITEM,
+            "description": "Adds a product to the grocery list. Use precise names as the family "
+            "writes them ('חלב תנובה 3%', 'ביצים גדולות'). One call per item; for multiple items "
+            "in one message, make multiple calls. Pass barcode (digits only, up to 32) when known "
+            "— the server auto-enriches with catalog name + current price + promo.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Product name as the family writes it."},
+                    "quantity": {"type": "integer", "description": "Default 1."},
+                    "barcode": {"type": "string", "description": "Optional, digits only."},
+                },
+                "required": ["name"],
+            },
+        },
+        {
+            "name": _REMOVE_GROCERY_ITEM,
+            "description": "Deletes an item from the list. ONLY call on explicit delete intent "
+            "('מחק', 'הסר', 'תוריד'). For 'קניתי כבר את X' / 'סמן X' use mark_grocery_bought "
+            "instead — checked ≠ removed.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "The item id from show_grocery_list."},
+                },
+                "required": ["id"],
+            },
+        },
+        {
+            "name": _MARK_GROCERY_BOUGHT,
+            "description": "Marks an item as checked (bought) without deleting it. Use for "
+            "'כבר קנינו X' / 'סמן את X' / 'קניתי כבר את X'.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "The item id from show_grocery_list."},
+                },
+                "required": ["id"],
+            },
+        },
+        {
+            "name": _UPDATE_GROCERY_ITEM,
+            "description": "Renames, requantifies, (un)checks, or sets the actual price on one "
+            "item. Pass only the fields to change. `actual_agorot` is an integer (1 shekel = 100 "
+            "agorot).",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "The item id from show_grocery_list."},
+                    "name": {"type": "string", "description": "New name. Optional."},
+                    "quantity": {"type": "integer", "description": "New quantity. Optional."},
+                    "actual_agorot": {
+                        "type": "integer",
+                        "description": "Actual paid price in integer agorot. Optional.",
+                    },
+                    "checked": {"type": "boolean", "description": "Optional checked state."},
+                },
+                "required": ["id"],
             },
         },
         {
