@@ -73,6 +73,10 @@ class ParsedMessage:
     audio_id: str | None = None
     image_id: str | None = None
     image_caption: str | None = None
+    # Set when the inbound is a tap on an interactive reply button Zoe sent
+    # earlier (e.g. the list↔expense convert button). Opaque payload decoded
+    # by the agent layer.
+    button_id: str | None = None
 
 
 def extract_message(payload: dict[str, Any]) -> ParsedMessage | None:
@@ -101,6 +105,11 @@ def extract_message(payload: dict[str, Any]) -> ParsedMessage | None:
             return ParsedMessage(
                 sender=sender, image_id=img["id"], image_caption=img.get("caption"),
             )
+        if msg_type == "interactive":
+            interactive = message.get("interactive", {})
+            if interactive.get("type") == "button_reply":
+                br = interactive.get("button_reply", {})
+                return ParsedMessage(sender=sender, button_id=br.get("id"))
         return None
     except (KeyError, IndexError, TypeError):
         logger.warning("Could not parse WhatsApp webhook payload: %s", payload)
@@ -121,6 +130,43 @@ async def download_media(media_id: str) -> tuple[bytes, str]:
         data = await client.get(media_url, headers=headers)
         data.raise_for_status()
         return data.content, mime_type
+
+
+async def send_interactive_message(to: str, body: str, buttons: list[dict]) -> None:
+    """Sends a WhatsApp interactive reply-button message. `buttons` is a list of
+    up to 3 dicts, each {"id": "<opaque payload, max 256 chars>", "title":
+    "<label, max 20 chars>"}. On failure Zoe silently loses the button — the
+    body text is what the user sees either way, so we fall back to a plain text
+    send so the message itself isn't lost."""
+    url = f"{GRAPH_API_BASE}/{settings.whatsapp_phone_number_id}/messages"
+    headers = {"Authorization": f"Bearer {settings.whatsapp_access_token}"}
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {"text": body},
+            "action": {
+                "buttons": [
+                    {"type": "reply", "reply": {"id": b["id"], "title": b["title"]}}
+                    for b in buttons[:3]
+                ],
+            },
+        },
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+        if resp.status_code >= 300:
+            logger.error(
+                "WhatsApp interactive send failed: HTTP %s %s; falling back to plain text",
+                resp.status_code, resp.text,
+            )
+            await send_message(to, body)
+    except httpx.HTTPError as exc:
+        logger.error("WhatsApp interactive send failed: %s; falling back to plain text", exc)
+        await send_message(to, body)
 
 
 async def send_message(to: str, text: str) -> None:
