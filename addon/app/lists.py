@@ -44,6 +44,20 @@ def add_item(list_name: str, text: str, sender: str) -> ListItem:
     return item
 
 
+def remove_by_id(list_name: str, item_id: str) -> ListItem | None:
+    """Removes the one item with this id. Used by the list↔expense convert button
+    where we need to delete exactly the entry we just added, not a text match."""
+    data = _load()
+    items = data.get(list_name, [])
+    for i, item in enumerate(items):
+        if item.id == item_id:
+            removed = items.pop(i)
+            data[list_name] = items
+            _save(data)
+            return removed
+    return None
+
+
 def remove_items(list_name: str, text: str) -> list[str]:
     """Removes all items whose text contains `text` (case-insensitive). Returns removed texts."""
     data = _load()

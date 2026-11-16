@@ -77,6 +77,18 @@ def add(
     return e
 
 
+def delete_by_id(expense_id: str) -> Expense | None:
+    """Removes the one expense with this id. Used by the list↔expense convert
+    button where we need to delete exactly the entry we just added."""
+    expenses = _load()
+    for i, e in enumerate(expenses):
+        if e.id == expense_id:
+            removed = expenses.pop(i)
+            _save(expenses)
+            return removed
+    return None
+
+
 def delete_last_manual(sender: str) -> Expense | None:
     """Removes the sender's most recent manually-entered expense (not auto/recurring)."""
     expenses = _load()
