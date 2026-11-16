@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 
-from app import grocery_client, grocery_secret
+from app import grocery_client, grocery_secret, lists
 from app.grocery_client import (
     GroceryAPIError, GroceryPairingError, GroceryTransportError,
 )
@@ -30,11 +30,30 @@ from app.grocery_idempotency import key_for
 
 logger = logging.getLogger(__name__)
 
+# Internal fallback list used when the grocery app isn't paired. Matches the
+# canonical name claude_agent.py teaches for shopping lists, so a later pair
+# operation can move items over without a rename.
+_FALLBACK_LIST = "shopping"
+
 
 def _not_paired() -> str:
     return (
         "The grocery app isn't paired yet. Open it → הגדרות → 'צור קוד חיבור', "
         "then send the 10-character code here with: `pair_grocery <code>`."
+    )
+
+
+def _fallback_add(sender: str, name: str, qty: int) -> str:
+    """Grocery app isn't paired → log the add to the internal shopping list so
+    the user's add doesn't disappear. Returned text reads like a normal add
+    and mentions the fallback once so the LLM can pass that through to the
+    user without composing a scary refusal."""
+    text = f"{qty} {name}" if qty != 1 else name
+    lists.add_item(_FALLBACK_LIST, text, sender)
+    return (
+        f"Added to shopping list: {text} ✅ "
+        "(grocery app isn't paired, so this is on the internal list for now — "
+        "pair the app when you're ready and new items will go there.)"
     )
 
 
@@ -70,6 +89,20 @@ async def _handle_grocery_call(sender: str, tool: str, inp: dict) -> str:
     # -------- paired-only operations below --------------------------------
     token = grocery_secret.get_token()
     if token is None:
+        # Soft-fallback for add: never drop a shopping-list intent on the floor
+        # just because the grocery app isn't paired. Other ops need grocery ids
+        # and have no useful fallback, so they still prompt for pairing.
+        if tool == "add_grocery_item":
+            name = (inp.get("name") or "").strip()
+            if not name:
+                return "I need a name for the item."
+            try:
+                qty = int(inp.get("quantity", 1))
+            except (TypeError, ValueError):
+                qty = 1
+            if qty < 1:
+                qty = 1
+            return _fallback_add(sender, name, qty)
         return _not_paired()
 
     if tool == "show_grocery_list":

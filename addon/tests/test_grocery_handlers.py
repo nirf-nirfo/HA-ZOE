@@ -85,6 +85,25 @@ class TestUnpairedFallthrough:
         out = _run(_handle_grocery_call(SENDER, "add_grocery_item", {"name": "חלב"}))
         assert "paired" in out.lower()
 
+    def test_add_without_token_falls_back_to_internal_list(self, tmp_stores):
+        """When the grocery app isn't paired, add_grocery_item still succeeds
+        by writing to the internal shopping list so the user doesn't lose the
+        intent and so Zoe doesn't compose an ambiguous refusal."""
+        from app import lists as internal_lists
+        out = _run(_handle_grocery_call(SENDER, "add_grocery_item", {"name": "חלב", "quantity": 2}))
+        assert "✅" in out
+        assert "חלב" in out
+        # Item actually landed on the internal 'shopping' list.
+        shopping = internal_lists.get_list("shopping")
+        assert len(shopping) == 1
+        assert shopping[0].text == "2 חלב"
+
+    def test_add_without_token_quantity_one_omits_number(self, tmp_stores):
+        from app import lists as internal_lists
+        _run(_handle_grocery_call(SENDER, "add_grocery_item", {"name": "לחם"}))
+        shopping = internal_lists.get_list("shopping")
+        assert len(shopping) == 1 and shopping[0].text == "לחם"
+
 
 # ---------------------------------------------------------------- mutations
 
