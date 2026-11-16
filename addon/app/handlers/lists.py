@@ -1,4 +1,5 @@
 """Item 06 split: household list tool handlers. Pure move out of main.py."""
+from app import turn_context
 from app.lists import add_item, clear_list, get_all_list_names, get_list, remove_items
 
 
@@ -9,7 +10,11 @@ def _handle_list_call(sender: str, tool: str, inp: dict) -> str:
         text = inp.get("text", "").strip()
         if not text:
             return "What should I add to the list?"
-        add_item(list_name, text, sender)
+        item = add_item(list_name, text, sender)
+        # Record for the reply-wrapper so Zoe's reply carries the
+        # "this is an expense" convert button. Last add wins when the LLM
+        # calls the tool more than once in a turn.
+        turn_context.record_list_add(list_name, item.id, text)
         return f"Added to {list_name}: {text} ✅"
 
     if tool == "remove_from_list":

@@ -1,5 +1,5 @@
 """Item 06 split: expense + recurring-expense tool handlers."""
-from app import expenses, recurring_expenses, senders
+from app import expenses, recurring_expenses, senders, turn_context
 from app.handlers._common import _fmt_ils, _valid_date
 
 
@@ -23,6 +23,11 @@ def _handle_expense_call(sender: str, tool: str, inp: dict) -> str:
         # (Receipt-vs-manual isn't reliably inferable from tool inputs alone.)
         source = inp.get("source") or "manual"
         e = expenses.add(sender, amount, category, payment_method, description, source=source, date=date)
+        # Record for the reply-wrapper so Zoe's reply carries the "this is for
+        # the shopping list" convert button. Only manual adds get the button;
+        # receipt-sourced expenses are explicit scans, not ambiguous inputs.
+        if source == "manual":
+            turn_context.record_expense_add(e.id, amount, description, category, payment_method)
         payment_note = f" ({payment_method})" if payment_method != "לא צוין" else ""
         desc_note = f" — {description}" if description else ""
         return f"נרשם ✅ {_fmt_ils(amount)} · {category}{payment_note}{desc_note} [id: {e.id}]"

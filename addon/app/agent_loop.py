@@ -9,7 +9,7 @@ import base64
 import time
 from inspect import isawaitable
 
-from app import conversation, conversation_log, inbound_tracker
+from app import conversation, conversation_log, inbound_tracker, turn_context
 from app.claude_agent import (
     BROADCAST_TOOLS,
     get_known_entities,
@@ -24,7 +24,7 @@ from app.ha_client import ha_client
 from app.logging_config import logger
 from app.settings import settings
 from app.transcribe import transcribe_audio
-from app.whatsapp import download_media, send_message
+from app.whatsapp import download_media, send_interactive_message, send_message
 
 
 # Safety cap on the agentic tool-use loop, so a confused turn can't call tools forever.
@@ -208,6 +208,10 @@ async def _run_check_in(
 
 async def _handle_message(sender: str, text: str, image_block: dict | None = None) -> None:
     from app.handlers.scheduled_actions import _execute_control_action
+    # Clear any convertible record left over in this task's ContextVar from a
+    # previous turn (same task gets reused across messages via create_task from
+    # the same parent context), so the reply wrapper only sees what THIS turn set.
+    turn_context.reset()
     confirmed = pop_if_confirmed(sender, text)
     if confirmed is not None:
         replies = []
@@ -272,7 +276,25 @@ async def _handle_message(sender: str, text: str, image_block: dict | None = Non
     should_broadcast = bool(tools_used & BROADCAST_TOOLS)
 
     if final_text:
-        await send_message(sender, final_text)
+        convertible = turn_context.get_convertible()
+        if convertible:
+            # Zoe added to the list OR logged a manual expense — offer a one-tap
+            # revert that flips the classification. Button only goes to the
+            # sender; the broadcast (if any) stays plain text, since another
+            # household member can't meaningfully revert someone else's action.
+            if convertible["kind"] == "list":
+                button = {
+                    "id": f"revert:list:{convertible['list_name']}:{convertible['item_id']}",
+                    "title": "זו הוצאה",
+                }
+            else:
+                button = {
+                    "id": f"revert:expense:{convertible['expense_id']}",
+                    "title": "זה לרשימת קניות",
+                }
+            await send_interactive_message(sender, final_text, [button])
+        else:
+            await send_message(sender, final_text)
         if should_broadcast:
             await _broadcast(final_text, sender, others_only=True)
         conversation.record(sender, text, final_text)
@@ -293,6 +315,25 @@ async def _process_message(parsed) -> None:
         inbound_tracker.record_inbound(sender)
     except Exception:
         logger.exception("Failed to record inbound for %s", sender)
+
+    # Button taps short-circuit the LLM: we already know what the user wants
+    # (the inverse of an action we just logged), so there's nothing to reason
+    # about. Run the revert, record it in conversation history, broadcast if
+    # the ledger changed, and return.
+    if parsed.button_id:
+        from app import revert
+        outcome = revert.handle(sender, parsed.button_id)
+        if outcome is None:
+            return
+        reply, broadcast = outcome
+        await send_message(sender, reply)
+        if broadcast:
+            await _broadcast(reply, sender, others_only=True)
+        marker = f"[tapped convert button: {parsed.button_id}]"
+        conversation.record(sender, marker, reply)
+        conversation_log.append(sender, marker, reply)
+        return
+
     text = parsed.text
     image_block = None
 
