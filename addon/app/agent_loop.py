@@ -9,6 +9,8 @@ import base64
 import time
 from inspect import isawaitable
 
+from anthropic import APIError
+
 from app import conversation, conversation_log, inbound_tracker, turn_context
 from app.claude_agent import (
     BROADCAST_TOOLS,
@@ -29,6 +31,26 @@ from app.whatsapp import download_media, send_interactive_message, send_message
 
 # Safety cap on the agentic tool-use loop, so a confused turn can't call tools forever.
 _MAX_AGENT_ITERS = 6
+
+
+def _api_error_user_message(exc: APIError) -> str:
+    """Translates an Anthropic APIError into a short WhatsApp line the user
+    can act on. Credit exhaustion and auth failures get specific wording so
+    the user knows exactly what to fix; everything else gets a generic
+    'API error' with the SDK's message appended so it's at least visible."""
+    text = str(exc)
+    lower = text.lower()
+    if "credit balance is too low" in lower or "credit" in lower and "low" in lower:
+        return (
+            "⚠️ Anthropic credits נגמרו — אני לא יכולה להגיב עד שתחדש. "
+            "console.anthropic.com → Plans & Billing."
+        )
+    if "authentication" in lower or "invalid x-api-key" in lower or "unauthorized" in lower:
+        return "⚠️ ה-Anthropic API key לא תקף. תבדוק את ההגדרה של ZOE ב-HA."
+    if "rate limit" in lower or "429" in lower:
+        return "⚠️ רייט-לימיט של Anthropic. נסה שוב בעוד דקה."
+    # Keep the generic surfaced too — silent failure is worse than noisy.
+    return f"⚠️ שגיאה מול Anthropic: {text[:200]}"
 
 
 def _allowed_senders() -> set[str]:
@@ -169,23 +191,34 @@ async def _run_check_in(
     messages: list = [{"role": "user", "content": context}]
     final_text = ""
 
-    for _ in range(_MAX_AGENT_ITERS):
-        message = await asyncio.to_thread(run_check_in_model, messages)
-        tool_uses = [b for b in message.content if b.type == "tool_use"]
-        if tool_uses:
-            messages.append({"role": "assistant", "content": message.content})
-            results = []
-            for tu in tool_uses:
-                logger.info("Check-in tool call: %s %s", tu.name, tu.input)
-                result = await _dispatch_tool(sender, tu.name, tu.input, known_entities, [])
-                results.append({"type": "tool_result", "tool_use_id": tu.id, "content": result})
-            messages.append({"role": "user", "content": results})
-            continue
-        if message.stop_reason == "pause_turn":
-            messages.append({"role": "assistant", "content": message.content})
-            continue
-        final_text = "".join(b.text for b in message.content if b.type == "text").strip()
-        break
+    try:
+        for _ in range(_MAX_AGENT_ITERS):
+            message = await asyncio.to_thread(run_check_in_model, messages)
+            tool_uses = [b for b in message.content if b.type == "tool_use"]
+            if tool_uses:
+                messages.append({"role": "assistant", "content": message.content})
+                results = []
+                for tu in tool_uses:
+                    logger.info("Check-in tool call: %s %s", tu.name, tu.input)
+                    result = await _dispatch_tool(sender, tu.name, tu.input, known_entities, [])
+                    results.append({"type": "tool_result", "tool_use_id": tu.id, "content": result})
+                messages.append({"role": "user", "content": results})
+                continue
+            if message.stop_reason == "pause_turn":
+                messages.append({"role": "assistant", "content": message.content})
+                continue
+            final_text = "".join(b.text for b in message.content if b.type == "text").strip()
+            break
+    except APIError as exc:
+        # Check-ins run on the scheduler, not from a user turn — silently
+        # dying here is especially bad because the user never knows a scheduled
+        # check-in was attempted. Log it and send a visible note instead.
+        logger.error("Anthropic API error during check-in %s: %s", check_in_id, exc)
+        try:
+            await send_message(sender, _api_error_user_message(exc))
+        except Exception:
+            logger.exception("Could not even notify %s about the API error", sender)
+        return
 
     if not final_text:
         logger.warning("Check-in produced no message for %s (prompt=%r)", sender, ci_prompt)
@@ -244,30 +277,39 @@ async def _handle_message(sender: str, text: str, image_block: dict | None = Non
     tools_used: set[str] = set()
     final_text = ""
 
-    for _ in range(_MAX_AGENT_ITERS):
-        message = await asyncio.to_thread(run_model, messages)
-        tool_uses = [b for b in message.content if b.type == "tool_use"]
+    try:
+        for _ in range(_MAX_AGENT_ITERS):
+            message = await asyncio.to_thread(run_model, messages)
+            tool_uses = [b for b in message.content if b.type == "tool_use"]
 
-        if tool_uses:
-            messages.append({"role": "assistant", "content": message.content})
-            results = []
-            for tu in tool_uses:
-                logger.info("Tool call: %s %s", tu.name, tu.input)
-                tools_used.add(tu.name)
-                result = await _dispatch_tool(sender, tu.name, tu.input, known_entities, pending_actions)
-                results.append({"type": "tool_result", "tool_use_id": tu.id, "content": result})
-            messages.append({"role": "user", "content": results})
-            continue
+            if tool_uses:
+                messages.append({"role": "assistant", "content": message.content})
+                results = []
+                for tu in tool_uses:
+                    logger.info("Tool call: %s %s", tu.name, tu.input)
+                    tools_used.add(tu.name)
+                    result = await _dispatch_tool(sender, tu.name, tu.input, known_entities, pending_actions)
+                    results.append({"type": "tool_result", "tool_use_id": tu.id, "content": result})
+                messages.append({"role": "user", "content": results})
+                continue
 
-        if message.stop_reason == "pause_turn":
-            # A server tool (web search) paused; re-send to let it resume.
-            messages.append({"role": "assistant", "content": message.content})
-            continue
+            if message.stop_reason == "pause_turn":
+                # A server tool (web search) paused; re-send to let it resume.
+                messages.append({"role": "assistant", "content": message.content})
+                continue
 
-        final_text = "".join(b.text for b in message.content if b.type == "text").strip()
-        break
-    else:
-        final_text = final_text or "סליחה, זה נהיה מסובך מדי ולא הצלחתי לסיים."
+            final_text = "".join(b.text for b in message.content if b.type == "text").strip()
+            break
+        else:
+            final_text = final_text or "סליחה, זה נהיה מסובך מדי ולא הצלחתי לסיים."
+    except APIError as exc:
+        # Previously this exception bubbled up to the asyncio task and died
+        # silently — the user saw no reply at all and had to guess why Zoe
+        # went quiet. Surface it, and give credit-exhaustion the specific
+        # wording that was most painful to miss.
+        logger.error("Anthropic API error during _handle_message: %s", exc)
+        await send_message(sender, _api_error_user_message(exc))
+        return
 
     if pending_actions:
         store_pending(sender, pending_actions)
