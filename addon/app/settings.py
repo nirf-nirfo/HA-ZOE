@@ -98,6 +98,15 @@ class Settings(BaseSettings):
     # hamoed") actually affect the output. Default off — deterministic renderer
     # is the safe fallback and stays wired up for exceptions/timeouts.
     briefing_model_compose: bool = False
+    # Hibernation switch for the whole email domain (Items 19-22): IMAP tools,
+    # watch loop, spam scanner. When false, the email_watch and spam_scan
+    # background loops don't start AND the email / spam / watch tools are
+    # dropped from the LLM's toolkit so the agent can't try to call them.
+    # Stored data (watches, spam memory, audit) is untouched — flipping back
+    # to true resumes where it left off. Default true for backward compat
+    # with existing installs; a user who doesn't use email flips it off in
+    # the HA add-on options.
+    email_integration_enabled: bool = True
 
 
 settings = Settings()

@@ -2009,8 +2009,16 @@ def _build_cached_tools() -> list[dict[str, Any]]:
     last entry carries a cache_control marker. Combined with the cache markers
     on `system`, the whole ~15k-token static prefix (system + tools) becomes a
     single cached prefix on the 2nd and later turns.
+
+    When `email_integration_enabled` is false, EMAIL/EMAIL_WATCH/SPAM tools are
+    dropped from the list entirely so the agent has no way to invoke them,
+    independent of whatever the prompt still mentions. The matching background
+    loops are gated in `loops.spawn_loops` on the same flag.
     """
     tools = _build_tools(_load_entities())
+    if not settings.email_integration_enabled:
+        hidden = EMAIL_TOOLS | EMAIL_WATCH_TOOLS | SPAM_TOOLS
+        tools = [t for t in tools if t.get("name") not in hidden]
     if tools:
         tools[-1] = {**tools[-1], "cache_control": {"type": "ephemeral"}}
     return tools

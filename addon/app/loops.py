@@ -380,9 +380,14 @@ def spawn_loops() -> None:
     asyncio.create_task(_daily_briefing_loop())
     asyncio.create_task(_check_in_loop())
     asyncio.create_task(_meta_window_loop())
-    # Item 21: hourly inbox watches. Base cadence 60s with per-watch
-    # interval_minutes gating; see `_email_watch_loop` for the full contract.
-    asyncio.create_task(_email_watch_loop())
-    # Item 22: spam auto-triage. Base cadence 60s with time-of-day + interval
-    # gating; mutations gated by email_write_enabled + schedule.dry_run.
-    asyncio.create_task(_spam_scan_loop())
+    if settings.email_integration_enabled:
+        # Item 21: hourly inbox watches. Base cadence 60s with per-watch
+        # interval_minutes gating; see `_email_watch_loop` for the full contract.
+        asyncio.create_task(_email_watch_loop())
+        # Item 22: spam auto-triage. Base cadence 60s with time-of-day + interval
+        # gating; mutations gated by email_write_enabled + schedule.dry_run.
+        asyncio.create_task(_spam_scan_loop())
+    else:
+        logger.info(
+            "email_integration_enabled=false → email watch + spam scan loops NOT started"
+        )
