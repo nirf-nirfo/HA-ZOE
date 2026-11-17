@@ -319,12 +319,18 @@ async def _handle_message(sender: str, text: str, image_block: dict | None = Non
 
     if final_text:
         convertible = turn_context.get_convertible()
-        if convertible:
-            # Zoe added to the list OR logged a manual expense — offer a one-tap
-            # revert that flips the classification. Button only goes to the
-            # sender; the broadcast (if any) stays plain text, since another
-            # household member can't meaningfully revert someone else's action.
-            if convertible["kind"] == "list":
+        # The convert button only makes sense for the shopping↔expense
+        # confusion case. A tasks-list add (or any other named list) has no
+        # meaningful 'this is an expense' sibling, so skip the button entirely
+        # for those and send plain text.
+        is_shopping_list = (
+            convertible is not None
+            and convertible["kind"] == "list"
+            and convertible.get("list_name") == "shopping"
+        )
+        is_expense = convertible is not None and convertible["kind"] == "expense"
+        if is_shopping_list or is_expense:
+            if is_shopping_list:
                 button = {
                     "id": f"revert:list:{convertible['list_name']}:{convertible['item_id']}",
                     "title": "זו הוצאה",
