@@ -77,6 +77,11 @@ class ParsedMessage:
     # earlier (e.g. the list↔expense convert button). Opaque payload decoded
     # by the agent layer.
     button_id: str | None = None
+    # wamid of the inbound message, so the primary reply can quote it (the
+    # "replied to:" header WhatsApp renders on native quote-replies). Only
+    # the reply to the sender uses this — broadcasts to other household
+    # members can't quote because wamids are scoped to the recipient device.
+    message_id: str | None = None
 
 
 def extract_message(payload: dict[str, Any]) -> ParsedMessage | None:
@@ -97,19 +102,20 @@ def extract_message(payload: dict[str, Any]) -> ParsedMessage | None:
         sender = message["from"]
         msg_type = message.get("type")
         if msg_type == "text":
-            return ParsedMessage(sender=sender, text=message["text"]["body"])
+            return ParsedMessage(sender=sender, text=message["text"]["body"], message_id=msg_id)
         if msg_type == "audio":
-            return ParsedMessage(sender=sender, audio_id=message["audio"]["id"])
+            return ParsedMessage(sender=sender, audio_id=message["audio"]["id"], message_id=msg_id)
         if msg_type == "image":
             img = message["image"]
             return ParsedMessage(
                 sender=sender, image_id=img["id"], image_caption=img.get("caption"),
+                message_id=msg_id,
             )
         if msg_type == "interactive":
             interactive = message.get("interactive", {})
             if interactive.get("type") == "button_reply":
                 br = interactive.get("button_reply", {})
-                return ParsedMessage(sender=sender, button_id=br.get("id"))
+                return ParsedMessage(sender=sender, button_id=br.get("id"), message_id=msg_id)
         return None
     except (KeyError, IndexError, TypeError):
         logger.warning("Could not parse WhatsApp webhook payload: %s", payload)
@@ -139,15 +145,19 @@ def _preview(text: str, cap: int = 60) -> str:
     return one if len(one) <= cap else one[: cap - 1] + "…"
 
 
-async def send_interactive_message(to: str, body: str, buttons: list[dict]) -> None:
+async def send_interactive_message(
+    to: str, body: str, buttons: list[dict], *, reply_to: str | None = None
+) -> None:
     """Sends a WhatsApp interactive reply-button message. `buttons` is a list of
     up to 3 dicts, each {"id": "<opaque payload, max 256 chars>", "title":
-    "<label, max 20 chars>"}. On failure Zoe silently loses the button — the
-    body text is what the user sees either way, so we fall back to a plain text
-    send so the message itself isn't lost."""
+    "<label, max 20 chars>"}. `reply_to` is the inbound wamid to quote so
+    WhatsApp renders the native "replied to:" header above the reply.
+    On failure Zoe silently loses the button — the body text is what the user
+    sees either way, so we fall back to a plain text send so the message
+    itself isn't lost."""
     url = f"{GRAPH_API_BASE}/{settings.whatsapp_phone_number_id}/messages"
     headers = {"Authorization": f"Bearer {settings.whatsapp_access_token}"}
-    payload = {
+    payload: dict = {
         "messaging_product": "whatsapp",
         "to": to,
         "type": "interactive",
@@ -162,6 +172,8 @@ async def send_interactive_message(to: str, body: str, buttons: list[dict]) -> N
             },
         },
     }
+    if reply_to:
+        payload["context"] = {"message_id": reply_to}
     logger.info("WhatsApp out → %s (interactive): %s", to, _preview(body))
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -171,22 +183,51 @@ async def send_interactive_message(to: str, body: str, buttons: list[dict]) -> N
                 "WhatsApp interactive send failed: HTTP %s %s; falling back to plain text",
                 resp.status_code, resp.text,
             )
-            await send_message(to, body)
+            await send_message(to, body, reply_to=reply_to)
     except httpx.HTTPError as exc:
         logger.error("WhatsApp interactive send failed: %s; falling back to plain text", exc)
-        await send_message(to, body)
+        await send_message(to, body, reply_to=reply_to)
 
 
-async def send_message(to: str, text: str) -> None:
-    logger.info("WhatsApp out → %s: %s", to, _preview(text))
+async def send_reaction(to: str, message_id: str, emoji: str) -> None:
+    """Puts a single-emoji reaction on `message_id`, as the native WhatsApp
+    message reaction (not a text reply). Used for ack-only inbounds ("תודה",
+    "אוקיי", "קיבלתי") so Zoe doesn't burn tokens composing a trivial
+    response. The empty string clears a prior reaction."""
     url = f"{GRAPH_API_BASE}/{settings.whatsapp_phone_number_id}/messages"
     headers = {"Authorization": f"Bearer {settings.whatsapp_access_token}"}
     payload = {
         "messaging_product": "whatsapp",
         "to": to,
+        "type": "reaction",
+        "reaction": {"message_id": message_id, "emoji": emoji},
+    }
+    logger.info("WhatsApp reaction → %s on %s: %s", to, message_id, emoji or "(cleared)")
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+        if resp.status_code >= 300:
+            logger.error("WhatsApp reaction failed: HTTP %s %s", resp.status_code, resp.text)
+    except httpx.HTTPError as exc:
+        logger.error("WhatsApp reaction failed: %s", exc)
+
+
+async def send_message(to: str, text: str, *, reply_to: str | None = None) -> None:
+    """Sends a plain WhatsApp text. `reply_to` is the inbound wamid to quote
+    (renders the native "replied to:" header). Omitted for broadcasts,
+    reminders, scheduled check-ins — anything that isn't a direct response to
+    one specific inbound from the recipient."""
+    logger.info("WhatsApp out → %s: %s", to, _preview(text))
+    url = f"{GRAPH_API_BASE}/{settings.whatsapp_phone_number_id}/messages"
+    headers = {"Authorization": f"Bearer {settings.whatsapp_access_token}"}
+    payload: dict = {
+        "messaging_product": "whatsapp",
+        "to": to,
         "type": "text",
         "text": {"body": text},
     }
+    if reply_to:
+        payload["context"] = {"message_id": reply_to}
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(url, headers=headers, json=payload)

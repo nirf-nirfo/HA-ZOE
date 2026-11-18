@@ -239,12 +239,18 @@ async def _run_check_in(
         logger.exception("Check-in %s: record_fire failed", check_in_id)
 
 
-async def _handle_message(sender: str, text: str, image_block: dict | None = None) -> None:
+async def _handle_message(
+    sender: str, text: str, image_block: dict | None = None,
+    *, reply_to: str | None = None,
+) -> None:
     from app.handlers.scheduled_actions import _execute_control_action
     # Clear any convertible record left over in this task's ContextVar from a
     # previous turn (same task gets reused across messages via create_task from
     # the same parent context), so the reply wrapper only sees what THIS turn set.
     turn_context.reset()
+    # Make the inbound wamid available to tool handlers (specifically
+    # react_to_message) without plumbing it through every signature.
+    turn_context.set_inbound_message_id(reply_to)
     confirmed = pop_if_confirmed(sender, text)
     if confirmed is not None:
         replies = []
@@ -256,7 +262,7 @@ async def _handle_message(sender: str, text: str, image_block: dict | None = Non
                 )
             )
         reply = "\n".join(replies)
-        await send_message(sender, reply)
+        await send_message(sender, reply, reply_to=reply_to)
         conversation.record(sender, text, reply)
         conversation_log.append(sender, text, reply)
         return
@@ -308,7 +314,7 @@ async def _handle_message(sender: str, text: str, image_block: dict | None = Non
         # went quiet. Surface it, and give credit-exhaustion the specific
         # wording that was most painful to miss.
         logger.error("Anthropic API error during _handle_message: %s", exc)
-        await send_message(sender, _api_error_user_message(exc))
+        await send_message(sender, _api_error_user_message(exc), reply_to=reply_to)
         return
 
     if pending_actions:
@@ -316,6 +322,15 @@ async def _handle_message(sender: str, text: str, image_block: dict | None = Non
 
     # Broadcast expense-related outcomes to the whole household; keep everything else private.
     should_broadcast = bool(tools_used & BROADCAST_TOOLS)
+
+    # If a tool already delivered the reply itself (today: react_to_message),
+    # skip the final_text send so the user doesn't get a reaction followed by
+    # a text wrap-up.
+    if turn_context.reply_handled():
+        if final_text:
+            conversation.record(sender, text, final_text)
+            conversation_log.append(sender, text, final_text)
+        return
 
     if final_text:
         convertible = turn_context.get_convertible()
@@ -340,16 +355,19 @@ async def _handle_message(sender: str, text: str, image_block: dict | None = Non
                     "id": f"revert:expense:{convertible['expense_id']}",
                     "title": "זה לרשימת קניות",
                 }
-            await send_interactive_message(sender, final_text, [button])
+            await send_interactive_message(sender, final_text, [button], reply_to=reply_to)
         else:
-            await send_message(sender, final_text)
+            await send_message(sender, final_text, reply_to=reply_to)
         if should_broadcast:
+            # Broadcast to others doesn't quote — the inbound wamid is scoped
+            # to the primary sender's device, so other household members'
+            # WhatsApp clients can't resolve it.
             await _broadcast(final_text, sender, others_only=True)
         conversation.record(sender, text, final_text)
         conversation_log.append(sender, text, final_text)
     elif not pending_actions:
         fallback = "I'm not sure what you mean — could you rephrase?"
-        await send_message(sender, fallback)
+        await send_message(sender, fallback, reply_to=reply_to)
         conversation.record(sender, text, fallback)
         conversation_log.append(sender, text, fallback)
 
@@ -374,7 +392,7 @@ async def _process_message(parsed) -> None:
         if outcome is None:
             return
         reply, broadcast = outcome
-        await send_message(sender, reply)
+        await send_message(sender, reply, reply_to=parsed.message_id)
         if broadcast:
             await _broadcast(reply, sender, others_only=True)
         marker = f"[tapped convert button: {parsed.button_id}]"
@@ -425,4 +443,4 @@ async def _process_message(parsed) -> None:
         return
 
     logger.info("Inbound from %s: %s", sender, text)
-    await _handle_message(sender, text, image_block)
+    await _handle_message(sender, text, image_block, reply_to=parsed.message_id)

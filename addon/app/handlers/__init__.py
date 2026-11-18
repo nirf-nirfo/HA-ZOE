@@ -17,15 +17,17 @@ from app.claude_agent import (
     EMAIL_TOOLS,
     EMAIL_WATCH_TOOLS,
     EXPENSE_TOOLS,
+    GROCERY_TOOLS,
     LIST_TOOLS,
     MEMORY_TOOLS,
     MONITOR_TOOLS,
     PERSONAL_TASK_TOOLS,
+    REACTION_TOOLS,
     REMINDER_TOOLS,
     SCHEDULED_ACTION_TOOLS,
     SPAM_TOOLS,
-    GROCERY_TOOLS,
 )
+from app.handlers.reactions import _handle_reaction_call
 from app.handlers.agenda import _handle_agenda_call
 from app.handlers.anchors import _handle_anchor_call
 from app.handlers.check_ins import _handle_check_in_call
@@ -121,6 +123,15 @@ def _wrap_email_watch(sender, tool, inp, known_entities, pending_actions):
     return _handle_email_watch_call(sender, tool, inp)
 
 
+async def _wrap_reaction(sender, tool, inp, known_entities, pending_actions):
+    # react_to_message hits Meta's reactions endpoint over HTTPS, so async.
+    # The handler also marks turn_context.reply_handled so _handle_message
+    # skips its normal text send — otherwise the user would get BOTH a
+    # reaction and a text follow-up for an inbound that didn't need either
+    # beyond acknowledgment.
+    return await _handle_reaction_call(sender, tool, inp)
+
+
 def _build_dispatch_table() -> dict[str, HandlerFn]:
     """Fan out each tool-family set into a single {tool_name: handler} map so
     dispatch is one dict lookup instead of a chain of `in` tests."""
@@ -141,6 +152,7 @@ def _build_dispatch_table() -> dict[str, HandlerFn]:
         (EMAIL_WATCH_TOOLS, _wrap_email_watch),
         (SPAM_TOOLS, _wrap_spam),
         (GROCERY_TOOLS, _wrap_grocery),
+        (REACTION_TOOLS, _wrap_reaction),
     ):
         for name in names:
             table[name] = fn

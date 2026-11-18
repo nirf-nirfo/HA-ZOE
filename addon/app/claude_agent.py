@@ -329,6 +329,9 @@ ANCHOR_TOOLS = {_ADD_ANCHOR, _LIST_ANCHORS, _REMOVE_ANCHOR, _SUPPRESS_ANCHOR}
 CONVERSATION_TOOLS = {_SEARCH_CONVERSATIONS}
 CHECK_IN_TOOLS = {_SCHEDULE_CHECK_IN, _LIST_CHECK_INS, _CANCEL_CHECK_IN}
 PERSONAL_TASK_TOOLS = {_ADD_PERSONAL_TASK, _LIST_PERSONAL_TASKS, _COMPLETE_PERSONAL_TASK, _CLEAR_PERSONAL_TASKS}
+# React-with-emoji side-effect tool. Not in any of the above domain sets —
+# it's its own trivial family handled directly by _wrap_react.
+REACTION_TOOLS = {"react_to_message"}
 
 # Tools ZOE may call from inside a scheduled check-in — read-only + write to
 # conversation log only. Prevents a check-in from silently controlling devices,
@@ -1942,6 +1945,32 @@ def _build_tools(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "id": {"type": "string", "description": "The watch id."},
                 },
                 "required": ["id"],
+            },
+        },
+        {
+            "name": "react_to_message",
+            "description": (
+                "Reacts to the user's INBOUND message with a single emoji instead of "
+                "composing a text reply. Use this for pure acknowledgments and small "
+                "social messages that do NOT ask a question and do NOT require Zoe to "
+                "report anything: 'תודה' → ❤️, 'אוקיי' / 'קיבלתי' / 'סבבה' / 'מגניב' → "
+                "👍, 'ווואו' / 'יפה' → 🎉, 'בוקר טוב' / 'ערב טוב' with no follow-up → "
+                "☀️ / 🌙. When used, do NOT also emit a text reply — the reaction IS "
+                "the response, and the whole point of this tool is to save tokens and "
+                "feel more natural than a trivial 'בכיף' reply. If the message asks a "
+                "question, requests action, or needs any information back, use the "
+                "normal tools + text reply instead of this."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "emoji": {
+                        "type": "string",
+                        "description": "A single emoji character to put on the inbound "
+                        "message, e.g. '❤️', '👍', '🎉', '☀️', '🌙'.",
+                    },
+                },
+                "required": ["emoji"],
             },
         },
         {"type": "web_search_20250305", "name": "web_search", "max_uses": 3},
