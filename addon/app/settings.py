@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     # require a restart.
     grocery_base_url: str = "https://grocery-list.nirflax1984.workers.dev"
     grocery_secret_path: str = "/data/grocery_secret.json"
+    # Item 25: durable per-trip effect progress for the post-shop loop.
+    # Rows survive restarts; first-enable seeds all current trip ids as
+    # processed so no historical backlog ever gets sent.
+    trip_tracker_path: str = "/data/trip_tracker.json"
     # Item 19: read-only email access via IMAP + an app password. Items 20/21
     # (receipt / iCal auto-extract, hourly watch loop) build on this. Blank
     # address / password means "email not configured" and the tools short-

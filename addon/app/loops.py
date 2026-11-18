@@ -9,9 +9,9 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from app import (
-    agenda, anchors, briefing, check_ins, email_watches, inbound_tracker,
-    monitors, recurring_expenses, scheduled_actions, senders,
-    spam_scan_schedule, spam_scanner,
+    agenda, anchors, briefing, check_ins, email_watches, grocery_client,
+    grocery_secret, inbound_tracker, lists, monitors, recurring_expenses,
+    scheduled_actions, senders, spam_scan_schedule, spam_scanner, trip_loop,
 )
 from app.agent_loop import _allowed_senders, _run_check_in
 from app.briefing_compile import _compile_evening_briefing, _compile_morning_briefing
@@ -352,6 +352,51 @@ async def _spam_scan_loop() -> None:
             logger.exception("Spam scan loop: run_scan failed")
 
 
+async def _grocery_trip_loop() -> None:
+    """Item 25: post-shop summary + unbought-to-tasks reconciler.
+
+    Polls the grocery Worker every 5 minutes. On the first ever tick with
+    history visible, seeds the trip tracker with all current trip ids as
+    'already processed' so no historical backlog gets replayed. On every
+    later tick, reconciles any unseen trips: send one Hebrew summary to
+    the household and create one shopping-list + one tasks-list row per
+    unbought item, each with a stable dedup key so a crash between effects
+    doesn't duplicate on restart.
+
+    Unpaired → quiet; the pairing prompt lives in the normal grocery tools.
+    """
+    while True:
+        await asyncio.sleep(300)
+        _beat("grocery_trip")
+        token = grocery_secret.get_token()
+        if token is None:
+            continue
+        deps = trip_loop._Deps(
+            fetch_history=lambda: grocery_client.get_history(token),
+            send_summary=_broadcast_to_household,
+            add_shopping=lambda text, sender: lists.add_item("shopping", text, sender),
+            add_tasks=lambda text, sender: lists.add_item("tasks", text, sender),
+        )
+        try:
+            outcome = await trip_loop.reconcile(deps)
+            if outcome.get("status") not in ("ok", "seeded", None):
+                _beat("grocery_trip", ok=False)
+        except Exception:
+            _beat("grocery_trip", ok=False)
+            logger.exception("Trip loop: unhandled error in reconcile")
+
+
+async def _broadcast_to_household(text: str) -> None:
+    """Sends `text` to every allowed sender. Mirrors agent_loop._broadcast but
+    without the primary-skip option (the loop has no primary — the trip
+    didn't come from a user turn)."""
+    for phone in _allowed_senders():
+        try:
+            await send_message(phone, text)
+        except Exception:
+            logger.exception("Trip loop broadcast to %s failed (24h window?)", phone)
+
+
 async def _reminder_loop() -> None:
     while True:
         await asyncio.sleep(60)
@@ -391,3 +436,7 @@ def spawn_loops() -> None:
         logger.info(
             "email_integration_enabled=false → email watch + spam scan loops NOT started"
         )
+    # Item 25: post-shop summary + unbought-to-tasks reconciler. 5-min poll
+    # against /api/zoe/history; first-enable seeds the tracker so no
+    # historical backlog ever ships.
+    asyncio.create_task(_grocery_trip_loop())

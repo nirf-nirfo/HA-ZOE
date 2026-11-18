@@ -30,6 +30,7 @@ _STORE_PATH_FIELDS = [
     "spam_scan_schedule_path",
     "spam_sender_memory_path",
     "spam_audit_path",
+    "trip_tracker_path",
 ]
 
 

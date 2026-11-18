@@ -106,6 +106,18 @@ async def get_history(token: str) -> dict:
     return await _get(token, "/api/zoe/history")
 
 
+async def get_summary(token: str) -> dict:
+    """GET /api/zoe/summary → {summary: {...} | null}.
+
+    Returns the single latest completed trip with bought/unbought/totals,
+    or `{"summary": null}` when there's no completed trip yet. Used as a
+    cheap poll-ahead check in `_grocery_trip_loop`; history is still the
+    source of truth for the reconcile step (it covers trips that finished
+    while Zoe was down).
+    """
+    return await _get(token, "/api/zoe/summary")
+
+
 async def apply_op(token: str, op: dict, idempotency_key: str) -> dict:
     """POST /api/zoe/operations with a single op and a mandatory idempotency key.
 
