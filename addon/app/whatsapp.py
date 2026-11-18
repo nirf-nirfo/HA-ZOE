@@ -132,6 +132,13 @@ async def download_media(media_id: str) -> tuple[bytes, str]:
         return data.content, mime_type
 
 
+def _preview(text: str, cap: int = 60) -> str:
+    """Short, single-line preview of outbound text for log lines so a
+    two-sends-for-one-turn bug is obvious in a tail of the log."""
+    one = " ".join((text or "").split())
+    return one if len(one) <= cap else one[: cap - 1] + "…"
+
+
 async def send_interactive_message(to: str, body: str, buttons: list[dict]) -> None:
     """Sends a WhatsApp interactive reply-button message. `buttons` is a list of
     up to 3 dicts, each {"id": "<opaque payload, max 256 chars>", "title":
@@ -155,6 +162,7 @@ async def send_interactive_message(to: str, body: str, buttons: list[dict]) -> N
             },
         },
     }
+    logger.info("WhatsApp out → %s (interactive): %s", to, _preview(body))
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(url, headers=headers, json=payload)
@@ -170,6 +178,7 @@ async def send_interactive_message(to: str, body: str, buttons: list[dict]) -> N
 
 
 async def send_message(to: str, text: str) -> None:
+    logger.info("WhatsApp out → %s: %s", to, _preview(text))
     url = f"{GRAPH_API_BASE}/{settings.whatsapp_phone_number_id}/messages"
     headers = {"Authorization": f"Bearer {settings.whatsapp_access_token}"}
     payload = {
